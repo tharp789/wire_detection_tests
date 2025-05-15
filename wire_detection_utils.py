@@ -1,5 +1,7 @@
 import numpy as np
 import cv2
+from scipy.stats import circmean
+from scipy.signal import find_peaks
 
 class WireDetector:
     def __init__(self, line_threshold, expansion_size, low_canny_threshold, high_canny_threshold, pixel_binning_size, bin_avg_threshold_multiplier):
@@ -24,19 +26,20 @@ class WireDetector:
         cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.line_threshold)
         if cartesian_lines is None:
             return None, None, None, None, None
+        
         cartesian_lines = np.squeeze(cartesian_lines,axis=1)
-        line_lengths = np.sqrt(
-            (cartesian_lines[:, 2] - cartesian_lines[:, 0]) ** 2 +  # x2 - x1
-            (cartesian_lines[:, 3] - cartesian_lines[:, 1]) ** 2    # y2 - y1
-        )
+        line_lengths = np.linalg.norm(cartesian_lines[:, 2:4] - cartesian_lines[:, 0:2], axis=1).astype(int)
         cartesian_lines = cartesian_lines[line_lengths > 10]
+        line_lengths = line_lengths[line_lengths > 10]
+
         if len(cartesian_lines) == 0:
             return None, None, None, None, None
 
-        line_angles = clamp_angles_pi(np.arctan2(cartesian_lines[:,3] - cartesian_lines[:,1], cartesian_lines[:,2] - cartesian_lines[:,0]))
-
-        unit_vectors = np.column_stack((np.cos(line_angles), np.sin(line_angles)))
-        avg_angle = np.arctan2(np.mean(unit_vectors[:,1]), np.mean(unit_vectors[:,0]))
+        line_angles = np.arctan2(
+            cartesian_lines[:, 3] - cartesian_lines[:, 1],  # y2 - y1
+            cartesian_lines[:, 2] - cartesian_lines[:, 0]   # x2 - x1
+        )
+        avg_angle = circmean(line_angles, high=np.pi, low=-np.pi)
 
         if self.img_shape == None:
             self.img_shape = seg_mask.shape
@@ -50,34 +53,25 @@ class WireDetector:
         x1_avg = int(self.cx - self.line_length * cos_avg)
         y1_avg = int(self.cy - self.line_length * sin_avg)
         center_line = np.array([x0_avg, y0_avg, x1_avg, y1_avg])
-        center_line_midpoint = ((x0_avg + x1_avg) / 2, (y0_avg + y1_avg) / 2)
-        return cartesian_lines, center_line, center_line_midpoint, avg_angle, seg_coords
+        return cartesian_lines, line_lengths, center_line, avg_angle, seg_coords
 
-    def get_line_instance_locations(self, cartesian_lines, center_line, center_line_midpoint, avg_angle, seg_coords):
-        distances_wrt_center = compute_perpendicular_distance(center_line, cartesian_lines)
-        # line_distances = np.sqrt((cartesian_lines[:,2] - cartesian_lines[:,0])**2 + (cartesian_lines[:,3] - cartesian_lines[:,1])**2).astype(np.int32)
-        line_distances = np.linalg.norm(cartesian_lines[:, 2:4] - cartesian_lines[:, 0:2], axis=1).astype(np.int32)
+    def get_line_instance_locations(self, cartesian_lines, line_lengths, center_line, avg_angle, seg_coords):
+        image_perp_distance = get_length_of_center_line_across_image(self.img_height, self.img_width, perpendicular_angle_rad(avg_angle))
+        bins = np.arange(- image_perp_distance // 2, image_perp_distance // 2 + self.pixel_binning_size, self.pixel_binning_size)
 
-        max_dist = np.max(distances_wrt_center)
-        min_dist = np.min(distances_wrt_center)
-        num_bins = max(1, int((max_dist - min_dist) // self.pixel_binning_size))
+        pixel_dists_wrt_center = self.compute_perpendicular_distance(center_line, cartesian_lines)
+        hist, bin_edges = np.histogram(pixel_dists_wrt_center, bins=bins)
+        
+        # find a threshold for where to count wire peaks based on count
+        bin_threshold = self.bin_avg_threshold_multiplier * np.mean(hist[hist > 0])
 
-        hist, bin_edges = np.histogram(distances_wrt_center, bins=num_bins, weights=line_distances)
-
-        wire_distances_wrt_center = np.array([])
-        bin_threshold = self.bin_avg_threshold_multiplier * np.mean(hist)
-        for i, counts in enumerate(hist):
-            if counts >= bin_threshold:
-                binned_wire_distances = distances_wrt_center[(distances_wrt_center >= bin_edges[i]) & (distances_wrt_center < bin_edges[i+1])]
-                if len(binned_wire_distances) != 0:
-                    avg_distance = np.mean(binned_wire_distances)
-                    wire_distances_wrt_center = np.append(wire_distances_wrt_center, avg_distance)
-        wire_distances_wrt_center = np.array(wire_distances_wrt_center)
-        wire_distances_wrt_center = wire_distances_wrt_center[~np.isnan(wire_distances_wrt_center)]
+        wire_distances_wrt_center = peak_hist_into_wires(hist, bin_edges, pixel_dists_wrt_center, bin_threshold)
 
         sin_offset, cos_offset = np.sin(avg_angle + np.pi / 2), np.cos(avg_angle + np.pi / 2)
-        new_midpoints = np.column_stack((center_line_midpoint[0] + wire_distances_wrt_center * cos_offset,
-                                     center_line_midpoint[1] + wire_distances_wrt_center * sin_offset))
+        new_midpoints = np.column_stack((
+            self.cx + wire_distances_wrt_center * cos_offset,
+            self.cy + wire_distances_wrt_center * sin_offset
+        ))
 
         dists = np.linalg.norm(seg_coords[:, None] - new_midpoints, axis=2)
         closest_indices = np.argmin(dists, axis=0)
@@ -91,12 +85,12 @@ class WireDetector:
 
         wire_lines = np.column_stack((new_x0, new_y0, new_x1, new_y1)).astype(int)
 
-        return wire_lines, wire_midpoints
+        return wire_lines, wire_midpoints, hist, bin_edges, bin_threshold, wire_distances_wrt_center
 
-    def detect_wires(self, seg_mask):
-        cartesian_lines, center_line, center_line_midpoint, avg_angle, seg_coords = self.get_hough_lines(seg_mask)
+    def detect_wires_2d(self, seg_mask):
+        cartesian_lines, line_lengths, center_line, avg_angle, seg_coords = self.get_hough_lines(seg_mask)
         if cartesian_lines is not None: 
-            wire_lines, wire_midpoints = self.get_line_instance_locations(cartesian_lines, center_line, center_line_midpoint, avg_angle, seg_coords)
+            wire_lines, wire_midpoints, _ , _ , _ , _ = self.get_line_instance_locations(cartesian_lines, line_lengths, center_line, avg_angle, seg_coords)
             wire_lines = np.array(wire_lines)
             wire_midpoints = np.array(wire_midpoints)
         else:
@@ -104,33 +98,94 @@ class WireDetector:
             wire_midpoints = np.array([])
         return wire_lines, wire_midpoints, avg_angle
     
+    def detect_wires_3d(self, seg_mask, depth):
+        wire_lines, wire_midpoints, avg_angle = self.detect_wires_2d(seg_mask)
+        if len(wire_lines) == 0:
+            return np.array([]), np.array([]), avg_angle
+        
     def create_seg_mask(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         seg_mask = cv2.Canny(gray, self.low_canny_threshold, self.high_canny_threshold, apertureSize=3)
         seg_mask = cv2.dilate(seg_mask, np.ones((self.expansion_size, self.expansion_size), np.uint8), iterations=1)
         seg_mask = cv2.erode(seg_mask, np.ones((self.expansion_size, self.expansion_size), np.uint8), iterations=1)
         return seg_mask
+    
+    def get_pixels_from_lines(self, lines):
+        img_mask = np.zeros((self.img_height, self.img_width), dtype=np.uint8)
+        for x1, y1, x2, y2 in lines:
+            cv2.line(img_mask, (x1, y1), (x2, y2), 255, 1)
+        pixels = np.argwhere(img_mask == 255)
+        pixels = pixels[:, [1, 0]]  # Convert to (x, y) format
+        return pixels
+    
+    def compute_perpendicular_distance(self, center_line, lines):
+        x1, y1, x2, y2 = center_line
+        
+        # Compute coefficients A, B, C of the line equation Ax + By + C = 0
+        A = y2 - y1
+        B = x1 - x2
+        C = x2 * y1 - x1 * y2
+        
+        # Extract pixel coordinates
+        pixels = self.get_pixels_from_lines(lines)
+        x0 = pixels[:, 0]
+        y0 = pixels[:, 1]
+        
+        # Compute perpendicular distances
+        distances = (A * x0 + B * y0 + C) / np.sqrt(A**2 + B**2)
+        return distances
+    
+def bin_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
+    """
+    Computes average distances within histogram bins whose counts exceed a threshold.
 
-def compute_perpendicular_distance(center_line, lines):
-    x1, y1, x2, y2 = center_line
-    
-    # Compute coefficients A, B, C of the line equation Ax + By + C = 0
-    A = y2 - y1
-    B = x1 - x2
-    C = x2 * y1 - x1 * y2
-    
-    # Extract line segment endpoints
-    x3, y3, x4, y4 = np.array(lines).T  # Transpose for easy slicing
-    
-    # Compute midpoints
-    x0 = (x3 + x4) / 2
-    y0 = (y3 + y4) / 2
-    
-    # Compute perpendicular distances
-    distances = (A * x0 + B * y0 + C) / np.sqrt(A**2 + B**2)
-    
-    return distances
+    Parameters:
+        hist (np.ndarray): Histogram counts.
+        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
+        distances_wrt_center (np.ndarray): Original distances.
+        bin_threshold (float): Minimum bin count to consider.
 
+    Returns:
+        np.ndarray: Filtered average distances for valid bins.
+    """
+    wire_distances_wrt_center = []
+
+    for i, counts in enumerate(hist):
+        if counts >= bin_threshold:
+            # Find distances within the current bin range
+            binned_wire_distances = distances_wrt_center[
+                (distances_wrt_center >= bin_edges[i]) & 
+                (distances_wrt_center < bin_edges[i + 1])
+            ]
+            if binned_wire_distances.size > 0:
+                avg_distance = np.mean(binned_wire_distances)
+                if not np.isnan(avg_distance):
+                    wire_distances_wrt_center.append(avg_distance)
+
+    return np.array(wire_distances_wrt_center)
+
+def peak_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
+    """
+    Computes average distances within histogram peaks whose counts exceed a threshold.
+
+    Parameters:
+        hist (np.ndarray): Histogram counts.
+        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
+        distances_wrt_center (np.ndarray): Original distances.
+        bin_threshold (float): Minimum bin count to consider.
+
+    Returns:
+        np.ndarray: Filtered average distances for valid peaks.
+    """
+    # Find peaks in the histogram
+    peaks, _ = find_peaks(hist, height=bin_threshold)
+
+    # Find the corresponding bin center for each peak
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    distances = bin_centers[peaks]
+
+    return np.array(distances)
+    
 def find_closest_point_on_3d_line(line_midpoint, yaw, target_point):
     assert line_midpoint.shape == (3,), f"Line midpoint must be a 3D point, got {line_midpoint.shape}"
     assert target_point.shape == (3,), f"Target point must be a 3D point, got {target_point.shape}"
@@ -147,6 +202,21 @@ def find_closest_point_on_3d_line(line_midpoint, yaw, target_point):
     t = np.dot(diff_vector, direction) / np.dot(direction, direction)
     closest_point = np.array([x0, y0, z0]) + t * direction
     return closest_point
+
+def get_length_of_center_line_across_image(image_height, image_width, angle):
+    assert isinstance(image_height, int) and isinstance(image_width, int), "Image dimensions must be integers"
+    assert isinstance(angle, (int, float)), "Angle must be a scalar"
+
+    # Calculate the length of the center line across the image
+    angle = angle % (2 * np.pi)  # Normalize angle to [0, 2π)
+    cos_angle = np.abs(np.cos(angle))
+    sin_angle = np.abs(np.sin(angle))
+
+    length = np.sqrt((image_height * sin_angle) ** 2 + (image_width * cos_angle) ** 2)
+    return length
+
+def perpendicular_angle_rad(angle_rad):
+    return (angle_rad + np.pi / 2) % (2 * np.pi)
     
 def clamp_angles_pi(angles):
     angles = np.asarray(angles)  # Ensure input is an array
@@ -172,7 +242,7 @@ def create_depth_viz(depth):
 def compute_yaw_from_3D_points(points):
     '''
     Compute the yaw from a set of 3D points.
-    Assumes y and z are planner coordinates.
+    Assumes z is up and y is forward, x is right.
     '''
 
     mean = np.mean(points, axis=0)
@@ -183,13 +253,10 @@ def compute_yaw_from_3D_points(points):
     direction = Vt[0]  # First row of Vt is the principal direction
     
     # Extract x and y components
-    # dx, dy = direction[0], direction[1]
+    dx, dy = direction[0], direction[1]
 
-    # # Extract y and z components
-    dy, dz = direction[1], direction[2]
     
     # Compute yaw angle
-    yaw_rad = np.arctan2(dy, dz)
-    # yaw_rad = np.arctan2(dy, dx)
+    yaw_rad = np.arctan2(dy, dx)
     
     return yaw_rad
