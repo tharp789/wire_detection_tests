@@ -293,10 +293,11 @@ def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
     """
     img_shape = depth_image.shape[:2]  # (height, width)
     img_center = np.array([img_shape[1] // 2, img_shape[0] // 2])  # (x, y)
-    mask = np.zeros(img_shape, dtype=np.uint8)
+    viz_mask = np.zeros(img_shape, dtype=np.uint8)
 
     # Example angle in radians
     # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
+    sectioned_depth = []
     for start, end in rois:
         center_dist = 0.5 * (start + end)  # scalar, along direction of avg_angle
         length = abs(end - start)          # width of the ROI
@@ -314,12 +315,15 @@ def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
         box = cv2.boxPoints(rect).astype(int)
 
         # Draw box on mask
-        cv2.fillConvexPoly(mask, box, 255)
+        cv2.fillConvexPoly(viz_mask, box, 255)
+        single_roi_mask = np.zeros(img_shape, dtype=np.uint8)
+        cv2.fillConvexPoly(single_roi_mask, box, 255)
+        sectioned_depth.append(cv2.bitwise_and(depth_image, depth_image, mask=single_roi_mask))
 
     if viz_img is not None:
-        masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=mask)
+        masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=viz_mask)
     
-    depth_masked = cv2.bitwise_and(depth_image, depth_image, mask=mask)
-    return depth_masked, masked_viz_img if viz_img is not None else None
+    depth_masked = cv2.bitwise_and(depth_image, depth_image, mask=viz_mask)
+    return depth_masked, sectioned_depth, masked_viz_img if viz_img is not None else None
     
  
