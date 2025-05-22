@@ -1,0 +1,7 @@
+line_threshold: 100
+pixel_binning_size: 3
+low_canny_threshold: 25
+high_canny_threshold: 200
+bin_avg_threshold_multiplier: 0.25
+value_threshold: 0.65
+

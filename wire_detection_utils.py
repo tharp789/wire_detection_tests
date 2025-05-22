@@ -4,9 +4,8 @@ from scipy.stats import circmean
 from scipy.signal import find_peaks
 
 class WireDetector:
-    def __init__(self, line_threshold, expansion_size, low_canny_threshold, high_canny_threshold, pixel_binning_size, bin_avg_threshold_multiplier):
+    def __init__(self, line_threshold, low_canny_threshold, high_canny_threshold, pixel_binning_size, bin_avg_threshold_multiplier):
         self.line_threshold = line_threshold
-        self.expansion_size = expansion_size
         self.low_canny_threshold = low_canny_threshold
         self.high_canny_threshold = high_canny_threshold
         self.pixel_binning_size = pixel_binning_size
@@ -90,24 +89,17 @@ class WireDetector:
     def detect_wires_2d(self, seg_mask):
         cartesian_lines, line_lengths, center_line, avg_angle, seg_coords = self.get_hough_lines(seg_mask)
         if cartesian_lines is not None: 
-            wire_lines, wire_midpoints, _ , _ , _ , _ = self.get_line_instance_locations(cartesian_lines, line_lengths, center_line, avg_angle, seg_coords)
+            wire_lines, wire_midpoints, _ , _ , _ , midpoint_dists_wrt_center = self.get_line_instance_locations(cartesian_lines, line_lengths, center_line, avg_angle, seg_coords)
             wire_lines = np.array(wire_lines)
             wire_midpoints = np.array(wire_midpoints)
         else:
             wire_lines = np.array([])
             wire_midpoints = np.array([])
-        return wire_lines, wire_midpoints, avg_angle
-    
-    def detect_wires_3d(self, seg_mask, depth):
-        wire_lines, wire_midpoints, avg_angle = self.detect_wires_2d(seg_mask)
-        if len(wire_lines) == 0:
-            return np.array([]), np.array([]), avg_angle
+        return wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center
         
     def create_seg_mask(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         seg_mask = cv2.Canny(gray, self.low_canny_threshold, self.high_canny_threshold, apertureSize=3)
-        seg_mask = cv2.dilate(seg_mask, np.ones((self.expansion_size, self.expansion_size), np.uint8), iterations=1)
-        seg_mask = cv2.erode(seg_mask, np.ones((self.expansion_size, self.expansion_size), np.uint8), iterations=1)
         return seg_mask
     
     def get_pixels_from_lines(self, lines):
@@ -255,8 +247,79 @@ def compute_yaw_from_3D_points(points):
     # Extract x and y components
     dx, dy = direction[0], direction[1]
 
-    
     # Compute yaw angle
     yaw_rad = np.arctan2(dy, dx)
     
     return yaw_rad
+
+def project_image_to_axis(value_img, yaw_rad):
+    """
+    Projects pixels from a depth image onto an axis through the image center at a given yaw angle,
+    and pairs each projection with its corresponding depth value.
+
+    Parameters:
+        depth_image (np.ndarray): 2D depth image.
+        yaw_degrees (float): Yaw angle in degrees.
+
+    Returns:
+        np.ndarray: Array of shape (N, 2) where each row is (normalized_projection, depth_value)
+    """
+    H, W = value_img.shape
+    center = np.array([W / 2.0, H / 2.0])
+
+    # Convert yaw to radians
+    axis = np.array([np.cos(yaw_rad), np.sin(yaw_rad)])
+
+    # Create meshgrid of pixel coordinates
+    x_coords, y_coords = np.meshgrid(np.arange(W), np.arange(H))  # shape: (H, W)
+    coords = np.stack([x_coords - center[0], y_coords - center[1]], axis=2)  # shape: (H, W, 2)
+
+    # Compute projections
+    projections = (coords @ axis).flatten()  # shape: (H, W)
+
+    values = value_img.flatten()
+    return projections, values
+
+def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
+    """
+    Convert a region of interest (ROI) to a binary mask.
+
+    Parameters:
+        roi (np.ndarray): Array of shape (N, 4) where each row is [x1, y1, x2, y2].
+        img_shape (tuple): Shape of the image (height, width).
+
+    Returns:
+        np.ndarray: Binary mask of the same shape as the image.
+    """
+    img_shape = depth_image.shape[:2]  # (height, width)
+    img_center = np.array([img_shape[1] // 2, img_shape[0] // 2])  # (x, y)
+    mask = np.zeros(img_shape, dtype=np.uint8)
+
+    # Example angle in radians
+    # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
+    for start, end in rois:
+        center_dist = 0.5 * (start + end)  # scalar, along direction of avg_angle
+        length = abs(end - start)          # width of the ROI
+
+        # Compute center offset in image coordinates
+        dx = center_dist * np.cos(perp_angle)
+        dy = center_dist * np.sin(perp_angle)
+        center_coords = (img_center[0] + dx, img_center[1] + dy)
+
+        # Define rectangle size: length along projected axis, large height perpendicular
+        size = (length, img_shape[1] * 2)  # (width, height)
+
+        # Create rotated rectangle
+        rect = (center_coords, size, np.degrees(perp_angle))
+        box = cv2.boxPoints(rect).astype(int)
+
+        # Draw box on mask
+        cv2.fillConvexPoly(mask, box, 255)
+
+    if viz_img is not None:
+        masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=mask)
+    
+    depth_masked = cv2.bitwise_and(depth_image, depth_image, mask=mask)
+    return depth_masked, masked_viz_img if viz_img is not None else None
+    
+ 
