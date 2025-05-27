@@ -195,6 +195,29 @@ def find_closest_point_on_3d_line(line_midpoint, yaw, target_point):
     closest_point = np.array([x0, y0, z0]) + t * direction
     return closest_point
 
+def find_closest_distance_from_points_to_line_3d(points, line_ends):
+    assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"
+    assert line_ends.shape[1] == 3 and line_ends.shape[0] == 2, f"Line ends must be 3D points, got shape {line_ends.shape}"
+
+    p1, p2 = line_ends
+    line_vector = p2 - p1
+    line_length_squared = np.dot(line_vector, line_vector)
+
+    # Vector from p1 to each point
+    p1_to_points = points - p1
+    t = np.dot(p1_to_points, line_vector) / line_length_squared
+
+    # Clamp t to the range [0, 1]
+    t_clamped = np.clip(t, 0, 1)
+
+    # Find the closest point on the line segment
+    closest_points = p1 + t_clamped[:, np.newaxis] * line_vector
+
+    # Calculate distances from points to the closest points on the line segment
+    distances = np.linalg.norm(points - closest_points, axis=1)
+    
+    return distances
+
 def get_length_of_center_line_across_image(image_height, image_width, angle):
     assert isinstance(image_height, int) and isinstance(image_width, int), "Image dimensions must be integers"
     assert isinstance(angle, (int, float)), "Angle must be a scalar"
@@ -218,18 +241,6 @@ def clamp_angles_pi(angles):
     angles = np.where(angles > np.pi, angles - np.pi, angles)  # Adjust >π
     
     return angles.item() if np.isscalar(angles) else angles
-
-def create_depth_viz(depth):
-    min_depth = 0.5
-    max_depth = 20.0
-    depth[np.isnan(depth)] = min_depth
-    depth[np.isinf(depth)] = min_depth
-    depth[np.isneginf(depth)] = min_depth
-
-    depth = (depth - min_depth) / (max_depth - min_depth)
-    depth = (depth * 255).astype(np.uint8)
-    depth = cv2.applyColorMap(depth, cv2.COLORMAP_JET)
-    return depth
 
 def compute_yaw_from_3D_points(points):
     '''
@@ -297,7 +308,8 @@ def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
 
     # Example angle in radians
     # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
-    sectioned_depth = []
+    roi_depths = []
+    roi_rgb = []
     for start, end in rois:
         center_dist = 0.5 * (start + end)  # scalar, along direction of avg_angle
         length = abs(end - start)          # width of the ROI
@@ -316,14 +328,100 @@ def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
 
         # Draw box on mask
         cv2.fillConvexPoly(viz_mask, box, 255)
+
         single_roi_mask = np.zeros(img_shape, dtype=np.uint8)
         cv2.fillConvexPoly(single_roi_mask, box, 255)
-        sectioned_depth.append(cv2.bitwise_and(depth_image, depth_image, mask=single_roi_mask))
+        single_roi_depth_image = cv2.bitwise_and(depth_image, depth_image, mask=single_roi_mask)
+        if viz_img is not None:
+            single_roi_rgb_image = cv2.bitwise_and(viz_img, viz_img, mask=single_roi_mask)
+            roi_rgb.append(single_roi_rgb_image)
+        roi_depths.append(single_roi_depth_image)
 
     if viz_img is not None:
         masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=viz_mask)
     
-    depth_masked = cv2.bitwise_and(depth_image, depth_image, mask=viz_mask)
-    return depth_masked, sectioned_depth, masked_viz_img if viz_img is not None else None
+    depth_img_masked = cv2.bitwise_and(depth_image, depth_image, mask=viz_mask)
+
+    return roi_depths, depth_img_masked, roi_rgb if viz_img is not None else None, masked_viz_img if viz_img is not None else None
+
+def depth_to_pointcloud(depth_image, camera_intrinsics, rgb=None, depth_clip=[0.5, 10.0]):
+    """
+    Convert a depth image to a 3D point cloud.
+
+    Parameters:
+        depth_image (np.ndarray): 2D depth image.
+        camera_intrinsics (np.ndarray): Camera intrinsic matrix.
+
+    Returns:
+        np.ndarray: 3D point cloud of shape (N, 3).
+    """
+    H, W = depth_image.shape
+
+    # Create meshgrid of pixel coordinates
+    x_coords, y_coords = np.meshgrid(np.arange(W), np.arange(H))  # shape: (H, W)
+
+    # Compute 3D points
+    flatted_coord = np.column_stack((x_coords.flatten(), y_coords.flatten(), np.ones_like(x_coords.flatten())))
+    z_coords = depth_image.flatten()
+    inv_camera_intrinsics = np.linalg.inv(camera_intrinsics)
+
+    rays = np.dot(inv_camera_intrinsics, flatted_coord.T).T
+    points = rays * z_coords.reshape(-1, 1)
+    valid_mask = ~np.isnan(z_coords) & (z_coords >= depth_clip[0]) & (z_coords <= depth_clip[1])
+    points = points[valid_mask]
+    if rgb is not None:
+        rgb = rgb.reshape(-1, 3)
+        rgb = rgb[valid_mask]
+    return points, rgb if rgb is not None else None
+
+def ransac_line_fitting(points, avg_angle, num_lines = 1, num_iterations=1000, inlier_threshold=0.05, vert_angle_thresh=np.pi/15, horiz_angle_thresh=np.pi/10):
+    """
+    RANSAC line fitting algorithm.
+
+    Parameters:
+        points (np.ndarray): Array of shape (N, 2) where each row is a point (x, y).
+        num_iterations (int): Number of RANSAC iterations.
+        threshold (float): Distance threshold to consider a point as an inlier.
+
+    Returns:
+        tuple: Best line parameters (slope, intercept) and inliers.
+    """
+    best_inliers = []
+    best_line = None
+    iters = 0
+    for i in range(num_lines):
+        while iters < num_iterations:
+            # Randomly select two points
+            sample_indices = np.random.choice(points.shape[0], 2, replace=False)
+            p1, p2 = points[sample_indices]
+            
+            pitch_angle = np.arctan2(np.abs(p2[2] - p1[2]), np.linalg.norm(p2[:2] - p1[:2]))
+            if pitch_angle > vert_angle_thresh:
+                iters += 1
+                continue
+
+            yaw_angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
+            yaw_angle = clamp_angles_pi(yaw_angle)
+            yaw_angle = clamp_angles_pi(yaw_angle - avg_angle)
+            if yaw_angle > horiz_angle_thresh:
+                iters += 1
+                continue
+
+            # Calculate line parameters
+            distances = find_closest_distance_from_points_to_line_3d(points, np.array([p1, p2]))
+
+            # Find inliers
+            inliers = points[distances < inlier_threshold]
+            # Update best line if current one has more inliers
+            if len(inliers) > len(best_inliers):
+                best_inliers = inliers
+                best_line = (p1, p2)
+            iters += 1
+        
+        # Remove inliers from the dataset
+        if best_line is not None and num_lines > 1:
+            points = points[inliers]
+
+    return best_line
     
  
