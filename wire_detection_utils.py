@@ -4,12 +4,14 @@ from scipy.stats import circmean
 from scipy.signal import find_peaks
 
 class WireDetector:
-    def __init__(self, line_threshold, low_canny_threshold, high_canny_threshold, pixel_binning_size, bin_avg_threshold_multiplier):
-        self.line_threshold = line_threshold
-        self.low_canny_threshold = low_canny_threshold
-        self.high_canny_threshold = high_canny_threshold
-        self.pixel_binning_size = pixel_binning_size
-        self.bin_avg_threshold_multiplier = bin_avg_threshold_multiplier
+    def __init__(self, wire_detection_config):
+        self.hough_vote_threshold = wire_detection_config['hough_vote_threshold']
+        self.min_line_threshold = wire_detection_config['min_line_threshold']
+        self.pixel_binning_size = wire_detection_config['pixel_binning_size']
+        self.low_canny_threshold = wire_detection_config['low_canny_threshold']
+        self.high_canny_threshold = wire_detection_config['high_canny_threshold']
+        self.line_bin_avg_threshold_multiplier = wire_detection_config['line_bin_avg_threshold_multiplier']
+        self.grad_bin_avg_threshold_multiplier = wire_detection_config['grad_bin_avg_threshold_multiplier']
         
         self.img_height = None
         self.img_width = None
@@ -22,14 +24,12 @@ class WireDetector:
         seg_coords = np.argwhere(seg_mask==255)
         seg_coords = seg_coords[:, [1, 0]]
 
-        cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.line_threshold)
+        cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.hough_vote_threshold, minLineLength=self.min_line_threshold, maxLineGap=10)
         if cartesian_lines is None:
-            return None, None, None, None, None
-        
+            return None, None, None, None, seg_coords
+
         cartesian_lines = np.squeeze(cartesian_lines,axis=1)
         line_lengths = np.linalg.norm(cartesian_lines[:, 2:4] - cartesian_lines[:, 0:2], axis=1).astype(int)
-        cartesian_lines = cartesian_lines[line_lengths > 10]
-        line_lengths = line_lengths[line_lengths > 10]
 
         if len(cartesian_lines) == 0:
             return None, None, None, None, None
@@ -39,6 +39,7 @@ class WireDetector:
             cartesian_lines[:, 2] - cartesian_lines[:, 0]   # x2 - x1
         )
         avg_angle = circmean(line_angles, high=np.pi, low=-np.pi)
+        avg_angle = fold_angles_from_0_to_pi(avg_angle)
 
         if self.img_shape == None:
             self.img_shape = seg_mask.shape
@@ -62,7 +63,7 @@ class WireDetector:
         hist, bin_edges = np.histogram(pixel_dists_wrt_center, bins=bins)
         
         # find a threshold for where to count wire peaks based on count
-        bin_threshold = self.bin_avg_threshold_multiplier * np.mean(hist[hist > 0])
+        bin_threshold = self.line_bin_avg_threshold_multiplier * np.mean(hist[hist > 0])
 
         wire_distances_wrt_center = peak_hist_into_wires(hist, bin_edges, pixel_dists_wrt_center, bin_threshold)
 
@@ -85,8 +86,17 @@ class WireDetector:
         wire_lines = np.column_stack((new_x0, new_y0, new_x1, new_y1)).astype(int)
 
         return wire_lines, wire_midpoints, hist, bin_edges, bin_threshold, wire_distances_wrt_center
+    
+    def create_seg_mask(self, rgb_image):
+        """
+        Create a binary segmentation mask from the RGB image using Canny edge detection.
+        """
+        gray = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
+        seg_mask = cv2.Canny(gray, self.low_canny_threshold, self.high_canny_threshold, apertureSize=3)
+        return seg_mask
 
-    def detect_wires_2d(self, seg_mask):
+    def detect_wires_2d(self, rgb_image):
+        seg_mask = self.create_seg_mask(rgb_image)
         cartesian_lines, line_lengths, center_line, avg_angle, seg_coords = self.get_hough_lines(seg_mask)
         if cartesian_lines is not None: 
             wire_lines, wire_midpoints, _ , _ , _ , midpoint_dists_wrt_center = self.get_line_instance_locations(cartesian_lines, line_lengths, center_line, avg_angle, seg_coords)
@@ -96,11 +106,6 @@ class WireDetector:
             wire_lines = np.array([])
             wire_midpoints = np.array([])
         return wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center
-        
-    def create_seg_mask(self, image):
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        seg_mask = cv2.Canny(gray, self.low_canny_threshold, self.high_canny_threshold, apertureSize=3)
-        return seg_mask
     
     def get_pixels_from_lines(self, lines):
         img_mask = np.zeros((self.img_height, self.img_width), dtype=np.uint8)
@@ -111,6 +116,14 @@ class WireDetector:
         return pixels
     
     def compute_perpendicular_distance(self, center_line, lines):
+        """
+        Computes the perpendicular distance from each line pixel to the center line.
+        Parameters:
+            center_line (np.ndarray): Coordinates of the center line in the format [x1, y1, x2, y2].
+            lines (np.ndarray): Array of lines in the format [x1, y1, x2, y2].
+        Returns:
+            np.ndarray: Perpendicular distances from each line pixel to the center line.
+        """
         x1, y1, x2, y2 = center_line
         
         # Compute coefficients A, B, C of the line equation Ax + By + C = 0
@@ -233,35 +246,17 @@ def get_length_of_center_line_across_image(image_height, image_width, angle):
 def perpendicular_angle_rad(angle_rad):
     return (angle_rad + np.pi / 2) % (2 * np.pi)
     
-def clamp_angles_pi(angles):
+def fold_angles_from_0_to_pi(angles):
+    '''
+    Fold angles to the range [0, π].
+    '''
     angles = np.asarray(angles)  # Ensure input is an array
-    angles = angles % (2 * np.pi)  # Wrap angles into [0, 2π)
-    
-    angles = np.where(angles < 0, angles + np.pi, angles)  # Adjust negatives
-    angles = np.where(angles > np.pi, angles - np.pi, angles)  # Adjust >π
-    
-    return angles.item() if np.isscalar(angles) else angles
+    angles = angles % (2 * np.pi)  # Wrap into [0, 2π)
 
-def compute_yaw_from_3D_points(points):
-    '''
-    Compute the yaw from a set of 3D points.
-    Assumes z is up and y is forward, x is right.
-    '''
+    # Fold anything > π into [0, π]
+    folded = np.where(angles > np.pi, angles - np.pi, angles)
 
-    mean = np.mean(points, axis=0)
-    centered_points = points - mean
-    _, _, Vt = np.linalg.svd(centered_points)
-    
-    # Principal direction (first principal component)
-    direction = Vt[0]  # First row of Vt is the principal direction
-    
-    # Extract x and y components
-    dx, dy = direction[0], direction[1]
-
-    # Compute yaw angle
-    yaw_rad = np.arctan2(dy, dx)
-    
-    return yaw_rad
+    return folded.item() if np.isscalar(angles) else folded
 
 def project_image_to_axis(value_img, yaw_rad):
     """
@@ -389,6 +384,7 @@ def ransac_line_fitting(points, avg_angle, num_lines = 1, num_iterations=1000, i
     best_inliers = []
     best_line = None
     iters = 0
+    avg_angle = fold_angles_from_0_to_pi(avg_angle)
     for i in range(num_lines):
         while iters < num_iterations:
             # Randomly select two points
@@ -396,14 +392,18 @@ def ransac_line_fitting(points, avg_angle, num_lines = 1, num_iterations=1000, i
             p1, p2 = points[sample_indices]
             
             pitch_angle = np.arctan2(np.abs(p2[2] - p1[2]), np.linalg.norm(p2[:2] - p1[:2]))
-            if pitch_angle > vert_angle_thresh:
+            pitch_angle = fold_angles_from_0_to_pi(pitch_angle)
+            if pitch_angle > vert_angle_thresh and pitch_angle < np.pi - vert_angle_thresh:
                 iters += 1
                 continue
 
             yaw_angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
-            yaw_angle = clamp_angles_pi(yaw_angle)
-            yaw_angle = clamp_angles_pi(yaw_angle - avg_angle)
-            if yaw_angle > horiz_angle_thresh:
+            yaw_angle = fold_angles_from_0_to_pi(yaw_angle)
+            
+            angle_diff = np.abs(yaw_angle - avg_angle)
+            if angle_diff > np.pi / 2:
+                angle_diff = np.abs(np.pi - angle_diff)
+            if angle_diff > horiz_angle_thresh:
                 iters += 1
                 continue
 
