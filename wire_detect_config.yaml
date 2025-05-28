@@ -1,8 +1,19 @@
+#Wire Detection Settings
 hough_vote_threshold: 100
 min_line_threshold: 30
 pixel_binning_size: 3
 low_canny_threshold: 25
 high_canny_threshold: 200
 line_bin_avg_threshold_multiplier: 0.35
-grad_bin_avg_threshold_multiplier: 0.5
+
+# ROI settings
+grad_bin_avg_threshold_multiplier: 0.9
+
+# RANSAC settings
+ransac_max_iters: 1000
+inlier_threshold_m: 0.1016
+vert_angle_maximum_rad: 0.0398132
+horz_angle_diff_maximum_rad: 0.0698132
+
+
 

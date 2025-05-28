@@ -11,8 +11,14 @@ class WireDetector:
         self.low_canny_threshold = wire_detection_config['low_canny_threshold']
         self.high_canny_threshold = wire_detection_config['high_canny_threshold']
         self.line_bin_avg_threshold_multiplier = wire_detection_config['line_bin_avg_threshold_multiplier']
+
         self.grad_bin_avg_threshold_multiplier = wire_detection_config['grad_bin_avg_threshold_multiplier']
         
+        self.ransac_max_iters = wire_detection_config['ransac_max_iters']
+        self.inlier_threshold_m = wire_detection_config['inlier_threshold_m']
+        self.vert_angle_maximum_rad = wire_detection_config['vert_angle_maximum_rad']
+        self.horz_angle_diff_maximum_rad = wire_detection_config['horz_angle_diff_maximum_rad']
+
         self.img_height = None
         self.img_width = None
         self.img_shape = None
@@ -26,20 +32,19 @@ class WireDetector:
 
         cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.hough_vote_threshold, minLineLength=self.min_line_threshold, maxLineGap=10)
         if cartesian_lines is None:
-            return None, None, None, None, seg_coords
+            return None, None, None
 
         cartesian_lines = np.squeeze(cartesian_lines,axis=1)
-        line_lengths = np.linalg.norm(cartesian_lines[:, 2:4] - cartesian_lines[:, 0:2], axis=1).astype(int)
 
         if len(cartesian_lines) == 0:
-            return None, None, None, None, None
+            return None, None, None
 
         line_angles = np.arctan2(
             cartesian_lines[:, 3] - cartesian_lines[:, 1],  # y2 - y1
             cartesian_lines[:, 2] - cartesian_lines[:, 0]   # x2 - x1
         )
-        avg_angle = circmean(line_angles, high=np.pi, low=-np.pi)
-        avg_angle = fold_angles_from_0_to_pi(avg_angle)
+        avg_angles = fold_angles_from_0_to_pi(line_angles)
+        avg_angle = circmean(avg_angles, high=np.pi, low=-np.pi)
 
         if self.img_shape == None:
             self.img_shape = seg_mask.shape
@@ -53,10 +58,11 @@ class WireDetector:
         x1_avg = int(self.cx - self.line_length * cos_avg)
         y1_avg = int(self.cy - self.line_length * sin_avg)
         center_line = np.array([x0_avg, y0_avg, x1_avg, y1_avg])
-        return cartesian_lines, line_lengths, center_line, avg_angle, seg_coords
+        return cartesian_lines, center_line, avg_angle
 
-    def get_line_instance_locations(self, cartesian_lines, line_lengths, center_line, avg_angle, seg_coords):
-        image_perp_distance = get_length_of_center_line_across_image(self.img_height, self.img_width, perpendicular_angle_rad(avg_angle))
+    def get_line_instance_locations(self, cartesian_lines, center_line, avg_angle):
+        perp_angle = perpendicular_angle_rad(avg_angle)
+        image_perp_distance = get_length_of_center_line_across_image(self.img_height, self.img_width, perp_angle)
         bins = np.arange(- image_perp_distance // 2, image_perp_distance // 2 + self.pixel_binning_size, self.pixel_binning_size)
 
         pixel_dists_wrt_center = self.compute_perpendicular_distance(center_line, cartesian_lines)
@@ -68,14 +74,14 @@ class WireDetector:
         wire_distances_wrt_center = peak_hist_into_wires(hist, bin_edges, pixel_dists_wrt_center, bin_threshold)
 
         sin_offset, cos_offset = np.sin(avg_angle + np.pi / 2), np.cos(avg_angle + np.pi / 2)
-        new_midpoints = np.column_stack((
+        wire_midpoints = np.column_stack((
             self.cx + wire_distances_wrt_center * cos_offset,
             self.cy + wire_distances_wrt_center * sin_offset
         ))
 
-        dists = np.linalg.norm(seg_coords[:, None] - new_midpoints, axis=2)
-        closest_indices = np.argmin(dists, axis=0)
-        wire_midpoints = seg_coords[closest_indices]
+        # dists = np.linalg.norm(seg_coords[:, None] - new_midpoints, axis=2)
+        # closest_indices = np.argmin(dists, axis=0)
+        # wire_midpoints = seg_coords[closest_indices]
 
         # Compute wire lines in a vectorized manner
         new_x0 = wire_midpoints[:, 0] + self.line_length * np.cos(avg_angle)
@@ -97,14 +103,16 @@ class WireDetector:
 
     def detect_wires_2d(self, rgb_image):
         seg_mask = self.create_seg_mask(rgb_image)
-        cartesian_lines, line_lengths, center_line, avg_angle, seg_coords = self.get_hough_lines(seg_mask)
+        cartesian_lines, center_line, avg_angle = self.get_hough_lines(seg_mask)
         if cartesian_lines is not None: 
-            wire_lines, wire_midpoints, _ , _ , _ , midpoint_dists_wrt_center = self.get_line_instance_locations(cartesian_lines, line_lengths, center_line, avg_angle, seg_coords)
+            wire_lines, wire_midpoints, _ , _ , _ , midpoint_dists_wrt_center = self.get_line_instance_locations(cartesian_lines, center_line, avg_angle)
             wire_lines = np.array(wire_lines)
             wire_midpoints = np.array(wire_midpoints)
         else:
             wire_lines = np.array([])
             wire_midpoints = np.array([])
+            midpoint_dists_wrt_center = np.array([])
+            avg_angle = None
         return wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center
     
     def get_pixels_from_lines(self, lines):
@@ -140,6 +148,173 @@ class WireDetector:
         distances = (A * x0 + B * y0 + C) / np.sqrt(A**2 + B**2)
         return distances
     
+    def find_regions_of_interest(self, depth, avg_angle, midpoint_dists_wrt_center):
+
+        depth_gradient_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=11)
+        depth_gradient_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=11)
+        perp_angle = perpendicular_angle_rad(avg_angle)
+        depth_gradient = depth_gradient_x * np.cos(perp_angle) + depth_gradient_y * np.sin(perp_angle)
+
+        distance, depth_gradient_1d = project_image_to_axis(depth_gradient, perp_angle)
+        depth_gradient_1d = np.abs(depth_gradient_1d)
+        depth_gradient_1d = depth_gradient_1d / np.max(depth_gradient_1d)
+
+        dist_hist, bin_edges = np.histogram(distance, bins=np.arange(np.min(distance), np.max(distance), 1), weights=depth_gradient_1d)
+        bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+        dist_hist = dist_hist / np.max(dist_hist)
+
+        threshold = self.grad_bin_avg_threshold_multiplier * np.mean(dist_hist)
+        mask = dist_hist > threshold
+        mask_diff = np.diff(mask.astype(int))
+        mask_diff = np.concatenate(([0], mask_diff))
+
+        start_indices = np.where(mask_diff == 1)[0]
+        end_indices = np.where(mask_diff == -1)[0]
+        # if ensure that the first start index is not after the first end index
+        if start_indices[0] > end_indices[0]:
+            start_indices = np.insert(start_indices, 0, 0)
+        if len(start_indices) > len(end_indices):
+            end_indices = np.append(end_indices, len(mask) - 1)
+        if len(end_indices) > len(start_indices):
+            start_indices = np.append(0, start_indices)
+        assert len(start_indices) == len(end_indices), "Mismatch in start and end indices length"
+
+        regions_of_interest = []
+        roi_line_count = []
+
+        for start, end in zip(start_indices, end_indices):
+            if bin_centers[start] < bin_centers[end]:
+                start = bin_centers[start]
+                end = bin_centers[end]
+                should_add_region = False
+                line_count = 0
+                for wire_dist in midpoint_dists_wrt_center: 
+                    if start <= wire_dist <= end:
+                        # Append the region to the list
+                        line_count += 1
+                        should_add_region = True
+                        
+                if should_add_region:
+                    regions_of_interest.append((start, end))
+                    roi_line_count.append(line_count)
+
+        return regions_of_interest, roi_line_count
+    
+    def roi_to_point_clouds(self, rois, avg_angle, depth_image, viz_img=None):
+        """
+        Convert a region of interest (ROI) to a binary mask.
+
+        Parameters:
+            roi (np.ndarray): Array of shape (N, 4) where each row is [x1, y1, x2, y2].
+            img_shape (tuple): Shape of the image (height, width).
+
+        Returns:
+            np.ndarray: Binary mask of the same shape as the image.
+        """
+
+        img_shape = depth_image.shape[:2]  # (height, width)
+        img_center = np.array([img_shape[1] // 2, img_shape[0] // 2])  # (x, y)
+        if viz_img is not None:
+            viz_mask = np.zeros_like(viz_img, dtype=np.uint8)
+
+        perp_angle = perpendicular_angle_rad(avg_angle)  # Get the perpendicular angle in radians
+
+        # Example angle in radians
+        # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
+        roi_depths = []
+        roi_rgb = []
+        for start, end in rois:
+            center_dist = 0.5 * (start + end)  # scalar, along direction of avg_angle
+            length = abs(end - start)          # width of the ROI
+
+            # Compute center offset in image coordinates
+            dx = center_dist * np.cos(perp_angle)
+            dy = center_dist * np.sin(perp_angle)
+            center_coords = (img_center[0] + dx, img_center[1] + dy)
+
+            # Define rectangle size: length along projected axis, large height perpendicular
+            size = (length, img_shape[1] * 2)  # (width, height)
+
+            # Create rotated rectangle
+            rect = (center_coords, size, np.degrees(perp_angle))
+            box = cv2.boxPoints(rect).astype(int)
+
+            # Draw box on mask
+            if viz_img is not None:
+                cv2.fillConvexPoly(viz_mask, box, 255)
+
+            single_roi_mask = np.zeros(img_shape, dtype=np.uint8)
+            cv2.fillConvexPoly(single_roi_mask, box, 255)
+            single_roi_depth_image = cv2.bitwise_and(depth_image, depth_image, mask=single_roi_mask)
+            if viz_img is not None:
+                single_roi_rgb_image = cv2.bitwise_and(viz_img, viz_img, mask=single_roi_mask)
+                roi_rgb.append(single_roi_rgb_image)
+            roi_depths.append(single_roi_depth_image)
+
+        if viz_img is not None:
+            masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=viz_mask)
+            depth_img_masked = cv2.bitwise_and(depth_image, depth_image, mask=viz_mask)
+            return roi_depths, depth_img_masked, roi_rgb, masked_viz_img
+        else:
+            return roi_depths, None, None, None
+    
+    def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, camera_intrinsics, viz_img=None):
+        """
+        Find wires in 3D from the regions of interest.
+
+        Parameters:
+            roi_depths (list): List of depth images for each ROI.
+            roi_rgbs (list): List of RGB images for each ROI.
+            camera_intrinsics (np.ndarray): Camera intrinsic matrix.
+            avg_angle (float): Average angle of the wires in radians.
+            roi_line_count (list): List of line counts for each ROI.
+
+        Returns:
+            fitted_lines (list): List of fitted lines in 3D.
+        """
+        fitted_lines = []
+        roi_pcs = []
+        roi_point_colors = []
+        roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
+
+        for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
+            # convert depth image to point cloud
+            points, colors = depth_to_pointcloud(roi_depth, camera_intrinsics, roi_rgb, depth_clip=[0.5, 15.0])
+            roi_pcs.append(points)
+            if colors is not None:
+                colors = (np.array(colors) / 255.0)[:,::-1]
+                roi_point_colors.append(colors)
+            lines = ransac_line_fitting(points, avg_angle, num_lines=line_count, num_iterations=self.ransac_max_iters, inlier_threshold=self.inlier_threshold_m, vert_angle_thresh=self.vert_angle_maximum_rad, horiz_angle_thresh=self.horz_angle_diff_maximum_rad)
+            fitted_lines += lines
+
+        assert len(fitted_lines) == sum(roi_line_counts), f"Mismatch in fitted lines count: {len(fitted_lines)} vs {sum(roi_line_counts)}"
+
+        return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None
+    
+    def find_3d_wires(self, rgb_image, depth_image, camera_intrinsics, viz_img=None):
+        """
+        Find wires in 3D from the RGB and depth images.
+
+        Parameters:
+            rgb_image (np.ndarray): RGB image.
+            depth_image (np.ndarray): Depth image.
+            camera_intrinsics (np.ndarray): Camera intrinsic matrix.
+
+        Returns:
+            fitted_lines (list): List of fitted lines in 3D.
+            roi_pcs (list): List of point clouds for each ROI.
+            roi_point_colors (list): List of colors for each point in the ROIs.
+        """
+        wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = self.detect_wires_2d(rgb_image)
+        if len(wire_lines) == 0:
+            return [], [], None
+
+        rois, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
+        fitted_lines, roi_pcs, roi_point_colors = self.ransac_on_rois(rois, roi_line_counts, avg_angle, depth_image, camera_intrinsics, viz_img=viz_img)
+
+        return fitted_lines, roi_pcs, roi_point_colors
+
+
 def bin_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
     """
     Computes average distances within histogram bins whose counts exceed a threshold.
@@ -236,15 +411,15 @@ def get_length_of_center_line_across_image(image_height, image_width, angle):
     assert isinstance(angle, (int, float)), "Angle must be a scalar"
 
     # Calculate the length of the center line across the image
-    angle = angle % (2 * np.pi)  # Normalize angle to [0, 2π)
-    cos_angle = np.abs(np.cos(angle))
-    sin_angle = np.abs(np.sin(angle))
+    angle = fold_angles_from_0_to_pi(angle)
+    cos_angle = np.cos(angle)
+    sin_angle = np.sin(angle)
 
     length = np.sqrt((image_height * sin_angle) ** 2 + (image_width * cos_angle) ** 2)
     return length
 
 def perpendicular_angle_rad(angle_rad):
-    return (angle_rad + np.pi / 2) % (2 * np.pi)
+    return fold_angles_from_0_to_pi(angle_rad + np.pi / 2)
     
 def fold_angles_from_0_to_pi(angles):
     '''
@@ -285,59 +460,6 @@ def project_image_to_axis(value_img, yaw_rad):
 
     values = value_img.flatten()
     return projections, values
-
-def roi_to_mask(rois, perp_angle, depth_image, viz_img=None):
-    """
-    Convert a region of interest (ROI) to a binary mask.
-
-    Parameters:
-        roi (np.ndarray): Array of shape (N, 4) where each row is [x1, y1, x2, y2].
-        img_shape (tuple): Shape of the image (height, width).
-
-    Returns:
-        np.ndarray: Binary mask of the same shape as the image.
-    """
-    img_shape = depth_image.shape[:2]  # (height, width)
-    img_center = np.array([img_shape[1] // 2, img_shape[0] // 2])  # (x, y)
-    viz_mask = np.zeros(img_shape, dtype=np.uint8)
-
-    # Example angle in radians
-    # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
-    roi_depths = []
-    roi_rgb = []
-    for start, end in rois:
-        center_dist = 0.5 * (start + end)  # scalar, along direction of avg_angle
-        length = abs(end - start)          # width of the ROI
-
-        # Compute center offset in image coordinates
-        dx = center_dist * np.cos(perp_angle)
-        dy = center_dist * np.sin(perp_angle)
-        center_coords = (img_center[0] + dx, img_center[1] + dy)
-
-        # Define rectangle size: length along projected axis, large height perpendicular
-        size = (length, img_shape[1] * 2)  # (width, height)
-
-        # Create rotated rectangle
-        rect = (center_coords, size, np.degrees(perp_angle))
-        box = cv2.boxPoints(rect).astype(int)
-
-        # Draw box on mask
-        cv2.fillConvexPoly(viz_mask, box, 255)
-
-        single_roi_mask = np.zeros(img_shape, dtype=np.uint8)
-        cv2.fillConvexPoly(single_roi_mask, box, 255)
-        single_roi_depth_image = cv2.bitwise_and(depth_image, depth_image, mask=single_roi_mask)
-        if viz_img is not None:
-            single_roi_rgb_image = cv2.bitwise_and(viz_img, viz_img, mask=single_roi_mask)
-            roi_rgb.append(single_roi_rgb_image)
-        roi_depths.append(single_roi_depth_image)
-
-    if viz_img is not None:
-        masked_viz_img = cv2.bitwise_and(viz_img, viz_img, mask=viz_mask)
-    
-    depth_img_masked = cv2.bitwise_and(depth_image, depth_image, mask=viz_mask)
-
-    return roi_depths, depth_img_masked, roi_rgb if viz_img is not None else None, masked_viz_img if viz_img is not None else None
 
 def depth_to_pointcloud(depth_image, camera_intrinsics, rgb=None, depth_clip=[0.5, 10.0]):
     """
@@ -381,11 +503,13 @@ def ransac_line_fitting(points, avg_angle, num_lines = 1, num_iterations=1000, i
     Returns:
         tuple: Best line parameters (slope, intercept) and inliers.
     """
-    best_inliers = []
-    best_line = None
-    iters = 0
     avg_angle = fold_angles_from_0_to_pi(avg_angle)
+    best_lines = []
     for i in range(num_lines):
+        best_inliers = []
+        best_outliers = []
+        best_line = None
+        iters = 0
         while iters < num_iterations:
             # Randomly select two points
             sample_indices = np.random.choice(points.shape[0], 2, replace=False)
@@ -411,17 +535,20 @@ def ransac_line_fitting(points, avg_angle, num_lines = 1, num_iterations=1000, i
             distances = find_closest_distance_from_points_to_line_3d(points, np.array([p1, p2]))
 
             # Find inliers
-            inliers = points[distances < inlier_threshold]
+            inliers = points[distances <= inlier_threshold]
             # Update best line if current one has more inliers
             if len(inliers) > len(best_inliers):
                 best_inliers = inliers
                 best_line = (p1, p2)
+                best_outliers = points[distances > inlier_threshold]
             iters += 1
         
-        # Remove inliers from the dataset
-        if best_line is not None and num_lines > 1:
-            points = points[inliers]
-
-    return best_line
+        # Remove inliers from the dataset for the next iteration
+        if best_line is not None:
+            best_lines.append(best_line)
+            if num_lines > 1:
+                # remove inliers from points
+                points = best_outliers
+    return best_lines
     
  
