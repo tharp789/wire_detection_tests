@@ -215,7 +215,7 @@ class WireDetector:
         img_shape = depth_image.shape[:2]  # (height, width)
         img_center = np.array([img_shape[1] // 2, img_shape[0] // 2])  # (x, y)
         if viz_img is not None:
-            viz_mask = np.zeros_like(viz_img, dtype=np.uint8)
+            viz_mask = np.zeros(viz_img.shape[:2], dtype=np.uint8)
 
         perp_angle = perpendicular_angle_rad(avg_angle)  # Get the perpendicular angle in radians
 

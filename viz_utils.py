@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import open3d as o3d
+from open3d.visualization.rendering import OffscreenRenderer, MaterialRecord
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 
@@ -71,39 +72,38 @@ def visualize_fitted_lines(fitted_lines, roi_pcs, roi_point_colors):
                                       point_show_normal=True,
                                       mesh_show_back_face=True)
     
-def capture_fitted_lines_in_image(fitted_lines, roi_pcs, roi_point_colors):
-    """
-    Captures fitted lines and corresponding point clouds in an image.
-    
-    Parameters:
-    - fitted_lines: List of tuples containing start and end points of fitted lines.
-    - roi_pcs: List of point clouds corresponding to each fitted line.
-    - roi_point_colors: List of colors for each point in the point clouds.
-    
-    Returns:
-    - image: An image with the fitted lines and point clouds visualized.
-    """
-    geometries = []
-    for line in fitted_lines:
-        cylinder = create_cylinder_between_points(line[0], line[1], radius=0.025)
-        geometries.append(cylinder)
+import open3d as o3d
+import numpy as np
 
-    for points, colors in zip(roi_pcs, roi_point_colors):
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
-        geometries.append(point_cloud)
+def capture_fitted_lines_in_image(fitted_lines, roi_pcs, roi_point_colors, width=640, height=480):
+    renderer = OffscreenRenderer(width, height)
+    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])  # White background
 
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(visible=False)
-    vis.add_geometry(geometries)
-    vis.poll_events()
-    vis.update_renderer()
-    
-    image = vis.capture_screen_float_buffer(do_render=True)
-    vis.destroy_window()
-    
-    return np.asarray(image)
+    material = MaterialRecord()
+    material.shader = "defaultUnlit"
+
+    # Add cylinders for lines
+    for i, (start, end) in enumerate(fitted_lines):
+        cyl = create_cylinder_between_points(start, end, radius=0.025)
+        renderer.scene.add_geometry(f"cyl_{i}", cyl, material)
+
+    # Add point clouds
+    for i, (points, colors) in enumerate(zip(roi_pcs, roi_point_colors)):
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(points)
+        pc.colors = o3d.utility.Vector3dVector(colors)
+        renderer.scene.add_geometry(f"pc_{i}", pc, material)
+
+    # Set up camera
+    cam_params = o3d.io.read_pinhole_camera_parameters("./viz_point.json")
+    renderer.setup_camera(cam_params.intrinsic, cam_params.extrinsic)
+
+
+    # Render to image
+    image_o3d = renderer.render_to_image()
+    image_np = np.asarray(image_o3d).astype(np.float32) / 255.0
+
+    return image_np
 
 def visualize_colored_point_cloud(depth_image, rgb_image, camera_intrinsics):
     min_depth = 0.5
