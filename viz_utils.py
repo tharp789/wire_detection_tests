@@ -71,20 +71,24 @@ def visualize_fitted_lines(fitted_lines, roi_pcs, roi_point_colors):
     o3d.visualization.draw_geometries(geometries, 
                                       point_show_normal=True,
                                       mesh_show_back_face=True)
-    
-import open3d as o3d
-import numpy as np
 
-def capture_fitted_lines_in_image(fitted_lines, roi_pcs, roi_point_colors, width=640, height=480):
+def create_renderer(width=1920, height=1080):
     renderer = OffscreenRenderer(width, height)
     renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])  # White background
+    renderer.scene.scene.enable_sun_light(True)
+
+    cam_params = o3d.io.read_pinhole_camera_parameters("./viz_point.json")
+    renderer.setup_camera(cam_params.intrinsic, cam_params.extrinsic)
 
     material = MaterialRecord()
-    material.shader = "defaultUnlit"
+    material.shader = "defaultLit"
+    
+    return renderer, material
 
+def capture_fitted_lines_in_image(renderer, material, img_name, fitted_lines, roi_pcs, roi_point_colors):
     # Add cylinders for lines
     for i, (start, end) in enumerate(fitted_lines):
-        cyl = create_cylinder_between_points(start, end, radius=0.025)
+        cyl = create_cylinder_between_points(start, end, radius=0.075)
         renderer.scene.add_geometry(f"cyl_{i}", cyl, material)
 
     # Add point clouds
@@ -94,21 +98,14 @@ def capture_fitted_lines_in_image(fitted_lines, roi_pcs, roi_point_colors, width
         pc.colors = o3d.utility.Vector3dVector(colors)
         renderer.scene.add_geometry(f"pc_{i}", pc, material)
 
-    # Set up camera
-    cam_params = o3d.io.read_pinhole_camera_parameters("./viz_point.json")
-    renderer.setup_camera(cam_params.intrinsic, cam_params.extrinsic)
-
-
     # Render to image
-    image_o3d = renderer.render_to_image()
-    image_np = np.asarray(image_o3d).astype(np.float32) / 255.0
-
-    return image_np
+    img_o3d = renderer.render_to_image()
+    o3d.io.write_image(img_name, img_o3d, 9)
+    renderer.scene.clear_geometry()
 
 def visualize_colored_point_cloud(depth_image, rgb_image, camera_intrinsics):
     min_depth = 0.5
     depth_image[depth_image <= min_depth] = 0
-
 
     intrinsics = o3d.camera.PinholeCameraIntrinsic(
         width=rgb_image.shape[1],
