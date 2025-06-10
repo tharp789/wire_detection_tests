@@ -15,6 +15,8 @@ class WireDetector:
 
         self.grad_bin_avg_threshold = wire_detection_config['grad_bin_avg_threshold']
         
+        self.min_depth_clip = wire_detection_config['min_depth_clip_m']
+        self.max_depth_clip = wire_detection_config['max_depth_clip_m']
         self.ransac_max_iters = wire_detection_config['ransac_max_iters']
         self.inlier_threshold_m = wire_detection_config['inlier_threshold_m']
         self.vert_angle_maximum_rad = wire_detection_config['vert_angle_maximum_rad']
@@ -365,12 +367,12 @@ class WireDetector:
 
         for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
             # convert depth image to point cloud
-            points, colors = depth_to_pointcloud(roi_depth, self.camera_intrinsics, roi_rgb, depth_clip=[0.5, 15.0])
+            points, colors = self.depth_to_pointcloud(roi_depth, rgb=roi_rgb, depth_clip=[self.min_depth_clip, self.max_depth_clip])
             roi_pcs.append(points)
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines = self.ransac_line_fitting(points, avg_angle, num_lines=line_count, num_iterations=self.ransac_max_iters, inlier_threshold=self.inlier_threshold_m, vert_angle_thresh=self.vert_angle_maximum_rad, horiz_angle_thresh=self.horz_angle_diff_maximum_rad)
+            lines = self.ransac_line_fitting(points, avg_angle, line_count)
             fitted_lines += lines
 
         return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
@@ -476,7 +478,10 @@ def get_length_of_center_line_across_image(image_height, image_width, angle):
     return length
 
 def perpendicular_angle_rad(angle_rad):
-    return fold_angles_from_0_to_pi(angle_rad + np.pi / 2)
+    perp_angle = fold_angles_from_0_to_pi(angle_rad + np.pi / 2)
+    if perp_angle > np.pi / 2:
+        perp_angle -= np.pi
+    return perp_angle
     
 def fold_angles_from_0_to_pi(angles):
     '''

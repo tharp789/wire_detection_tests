@@ -10,9 +10,12 @@ line_bin_avg_threshold_multiplier: 0.35
 grad_bin_avg_threshold: 0.05
 
 # RANSAC settings
+min_depth_clip_m: 0.5
+max_depth_clip_m: 15.0
 ransac_max_iters: 500
 inlier_threshold_m: 0.1016
-vert_angle_maximum_rad: 0.0398132
+# vert_angle_maximum_rad: 0.0398132
+vert_angle_maximum_rad: 0.174533
 horz_angle_diff_maximum_rad: 0.0698132
 
 
