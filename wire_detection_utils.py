@@ -364,7 +364,8 @@ class WireDetector:
         roi_pcs = []
         roi_point_colors = []
         roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
-
+        if roi_rgbs is None:
+            roi_rgbs = [None] * len(roi_depths)
         for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
             # convert depth image to point cloud
             points, colors = self.depth_to_pointcloud(roi_depth, rgb=roi_rgb, depth_clip=[self.min_depth_clip, self.max_depth_clip])
@@ -377,7 +378,7 @@ class WireDetector:
 
         return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
     
-    def detect_3d_wires(self, rgb_image, depth_image):
+    def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
         """
         Find wires in 3D from the RGB and depth images.
         """
@@ -385,9 +386,12 @@ class WireDetector:
 
         regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
 
-        fitted_lines, _ , _ , _ = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
+        if generate_viz:
+            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
+        else:
+            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
 
-        return fitted_lines
+        return fitted_lines, rgb_masked
     
     def depth_to_pointcloud(self, depth_image, rgb=None, depth_clip=[0.5, 10.0]):
         """
