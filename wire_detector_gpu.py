@@ -3,7 +3,9 @@ import cv2
 from scipy.stats import circmean
 from scipy.signal import find_peaks
 
-class WireDetector:
+from wire_detection_utils import fold_angles_from_0_to_pi, perpendicular_angle_rad, project_image_to_axis, peak_hist_into_wires, find_closest_distance_from_points_to_line_3d, get_length_of_center_line_across_image
+
+class WireDetectorGPU:
     def __init__(self, wire_detection_config, camera_intrinsics):
 
         self.hough_vote_threshold = wire_detection_config['hough_vote_threshold']
@@ -14,7 +16,9 @@ class WireDetector:
         self.line_bin_avg_threshold_multiplier = wire_detection_config['line_bin_avg_threshold_multiplier']
 
         self.grad_bin_avg_threshold = wire_detection_config['grad_bin_avg_threshold']
-        
+
+        self.min_depth_clip = wire_detection_config['min_depth_clip_m']
+        self.max_depth_clip = wire_detection_config['max_depth_clip_m']
         self.ransac_max_iters = wire_detection_config['ransac_max_iters']
         self.inlier_threshold_m = wire_detection_config['inlier_threshold_m']
         self.vert_angle_maximum_rad = wire_detection_config['vert_angle_maximum_rad']
@@ -29,31 +33,52 @@ class WireDetector:
         self.cy = None
         self.line_length = None
 
-    def get_hough_lines(self, seg_mask):
-        seg_coords = np.argwhere(seg_mask==255)
-        seg_coords = seg_coords[:, [1, 0]]
+        # Persistent GPU Mats
+        self.gpu_rgb = cv2.cuda_GpuMat()
+        self.gpu_depth = cv2.cuda_GpuMat()
+        self.gpu_gray = cv2.cuda_GpuMat()
 
-        cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.hough_vote_threshold, minLineLength=self.min_line_threshold, maxLineGap=10)
-        if cartesian_lines is None:
+        # Persistent CUDA filters
+        self.canny_detector = cv2.cuda.createCannyEdgeDetector(
+            self.low_canny_threshold, self.high_canny_threshold, apertureSize=3
+        )
+        self.hough_detector = cv2.cuda.createHoughSegmentDetector(
+            rho=1,
+            theta=np.pi / 180,
+            threshold=self.hough_vote_threshold,
+            minLineLength=self.min_line_threshold,
+            maxLineGap=10
+        )
+
+        self.sobel_x = cv2.cuda.createSobelFilter(cv2.CV_32F, cv2.CV_32F, 1, 0, ksize=11)
+        self.sobel_y = cv2.cuda.createSobelFilter(cv2.CV_32F, cv2.CV_32F, 0, 1, ksize=11)
+
+    def get_hough_lines(self, rgb_image):
+        self.gpu_rgb.upload(rgb_image)
+        self.gpu_gray = cv2.cuda.cvtColor(self.gpu_rgb, cv2.COLOR_RGB2GRAY)
+        gpu_edges = self.canny_detector.detect(self.gpu_gray)
+        gpu_lines = self.hough_detector.detect(gpu_edges)
+
+        if gpu_lines is None or gpu_lines.empty():
             return None, None, None
 
-        cartesian_lines = np.squeeze(cartesian_lines,axis=1)
-
+        cartesian_lines = gpu_lines.download()
+        cartesian_lines = np.squeeze(cartesian_lines, axis=1)
         if len(cartesian_lines) == 0:
             return None, None, None
 
         line_angles = np.arctan2(
-            cartesian_lines[:, 3] - cartesian_lines[:, 1],  # y2 - y1
-            cartesian_lines[:, 2] - cartesian_lines[:, 0]   # x2 - x1
+            cartesian_lines[:, 3] - cartesian_lines[:, 1],
+            cartesian_lines[:, 2] - cartesian_lines[:, 0]
         )
         avg_angles = fold_angles_from_0_to_pi(line_angles)
         avg_angle = circmean(avg_angles, high=np.pi, low=-np.pi)
 
-        if self.img_shape == None:
-            self.img_shape = seg_mask.shape
+        if self.img_shape is None:
+            self.img_shape = rgb_image.shape[:2]
             self.img_height, self.img_width = self.img_shape
-            self.cx, self.cy = self.img_shape[1] // 2, self.img_shape[0] // 2
-            self.line_length = max(self.img_shape[1], self.img_shape[0]) * 2
+            self.cx, self.cy = self.img_width // 2, self.img_height // 2
+            self.line_length = max(self.img_width, self.img_height) * 2
 
         cos_avg, sin_avg = np.cos(avg_angle), np.sin(avg_angle)
         x0_avg = int(self.cx + self.line_length * cos_avg)
@@ -150,13 +175,16 @@ class WireDetector:
         # Compute perpendicular distances
         distances = (A * x0 + B * y0 + C) / np.sqrt(A**2 + B**2)
         return distances
-    
-    def find_regions_of_interest(self, depth, avg_angle, midpoint_dists_wrt_center, viz_img=None):
 
-        depth_gradient_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=11)
-        depth_gradient_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=11)
+    def find_regions_of_interest(self, depth, avg_angle, midpoint_dists_wrt_center):
+        self.gpu_depth.upload(depth.astype(np.float32))
+        gpu_grad_x = self.sobel_x.apply(self.gpu_depth)
+        gpu_grad_y = self.sobel_y.apply(self.gpu_depth)
+        grad_x = gpu_grad_x.download()
+        grad_y = gpu_grad_y.download()
+
         perp_angle = perpendicular_angle_rad(avg_angle)
-        depth_gradient = depth_gradient_x * np.cos(perp_angle) + depth_gradient_y * np.sin(perp_angle)
+        depth_gradient = grad_x * np.cos(perp_angle) + grad_y * np.sin(perp_angle)
 
         distance, depth_gradient_1d = project_image_to_axis(depth_gradient, perp_angle)
         depth_gradient_1d = np.abs(depth_gradient_1d)
@@ -173,18 +201,21 @@ class WireDetector:
 
         start_indices = np.where(mask_diff == 1)[0]
         end_indices = np.where(mask_diff == -1)[0]
-        # if ensure that the first start index is not after the first end index
+
+        if len(start_indices) == 0 or len(end_indices) == 0:
+            return [], []
+
         if start_indices[0] > end_indices[0]:
             start_indices = np.insert(start_indices, 0, 0)
         if len(start_indices) > len(end_indices):
             end_indices = np.append(end_indices, len(mask) - 1)
         if len(end_indices) > len(start_indices):
-            start_indices = np.append(0, start_indices)
+            start_indices = np.insert(start_indices, 0, 0)
+
         assert len(start_indices) == len(end_indices), "Mismatch in start and end indices length"
 
         regions_of_interest = []
         roi_line_count = []
-
         for start, end in zip(start_indices, end_indices):
             if bin_centers[start] < bin_centers[end]:
                 start = bin_centers[start]
@@ -202,7 +233,7 @@ class WireDetector:
                     roi_line_count.append(line_count)
 
         return regions_of_interest, roi_line_count
-    
+
     def roi_to_point_clouds(self, rois, avg_angle, depth_image, viz_img=None):
         """
         Convert a region of interest (ROI) to a binary mask.
@@ -362,20 +393,21 @@ class WireDetector:
         roi_pcs = []
         roi_point_colors = []
         roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
-
+        if roi_rgbs is None:
+            roi_rgbs = [None] * len(roi_depths)
         for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
             # convert depth image to point cloud
-            points, colors = depth_to_pointcloud(roi_depth, self.camera_intrinsics, roi_rgb, depth_clip=[0.5, 15.0])
+            points, colors = self.depth_to_pointcloud(roi_depth, rgb=roi_rgb, depth_clip=[self.min_depth_clip, self.max_depth_clip])
             roi_pcs.append(points)
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines = self.ransac_line_fitting(points, avg_angle, num_lines=line_count, num_iterations=self.ransac_max_iters, inlier_threshold=self.inlier_threshold_m, vert_angle_thresh=self.vert_angle_maximum_rad, horiz_angle_thresh=self.horz_angle_diff_maximum_rad)
+            lines = self.ransac_line_fitting(points, avg_angle, line_count)
             fitted_lines += lines
 
         return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
     
-    def detect_3d_wires(self, rgb_image, depth_image):
+    def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
         """
         Find wires in 3D from the RGB and depth images.
         """
@@ -383,9 +415,12 @@ class WireDetector:
 
         regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
 
-        fitted_lines, _ , _ , _ = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
+        if generate_viz:
+            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
+        else:
+            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
 
-        return fitted_lines
+        return fitted_lines, rgb_masked
     
     def depth_to_pointcloud(self, depth_image, rgb=None, depth_clip=[0.5, 10.0]):
         """
@@ -417,104 +452,3 @@ class WireDetector:
             rgb = rgb[valid_mask]
         return points, rgb if rgb is not None else None
     
-
-def peak_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
-    """
-    Computes average distances within histogram peaks whose counts exceed a threshold.
-
-    Parameters:
-        hist (np.ndarray): Histogram counts.
-        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
-        distances_wrt_center (np.ndarray): Original distances.
-        bin_threshold (float): Minimum bin count to consider.
-
-    Returns:
-        np.ndarray: Filtered average distances for valid peaks.
-    """
-    # Find peaks in the histogram
-    peaks, _ = find_peaks(hist, height=bin_threshold)
-
-    # Find the corresponding bin center for each peak
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    distances = bin_centers[peaks]
-
-    return np.array(distances)
-
-def find_closest_distance_from_points_to_line_3d(points, line_ends):
-    assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"
-    assert line_ends.shape[1] == 3 and line_ends.shape[0] == 2, f"Line ends must be 3D points, got shape {line_ends.shape}"
-
-    p1, p2 = line_ends
-    line_vector = p2 - p1
-    line_length_squared = np.dot(line_vector, line_vector)
-
-    # Vector from p1 to each point
-    p1_to_points = points - p1
-    t = np.dot(p1_to_points, line_vector) / line_length_squared
-
-    # Clamp t to the range [0, 1]
-    t_clamped = np.clip(t, 0, 1)
-
-    # Find the closest point on the line segment
-    closest_points = p1 + t_clamped[:, np.newaxis] * line_vector
-
-    # Calculate distances from points to the closest points on the line segment
-    distances = np.linalg.norm(points - closest_points, axis=1)
-    
-    return distances
-
-def get_length_of_center_line_across_image(image_height, image_width, angle):
-    assert isinstance(image_height, int) and isinstance(image_width, int), "Image dimensions must be integers"
-    assert isinstance(angle, (int, float)), "Angle must be a scalar"
-
-    # Calculate the length of the center line across the image
-    angle = fold_angles_from_0_to_pi(angle)
-    cos_angle = np.cos(angle)
-    sin_angle = np.sin(angle)
-
-    length = np.sqrt((image_height * sin_angle) ** 2 + (image_width * cos_angle) ** 2)
-    return length
-
-def perpendicular_angle_rad(angle_rad):
-    return fold_angles_from_0_to_pi(angle_rad + np.pi / 2)
-    
-def fold_angles_from_0_to_pi(angles):
-    '''
-    Fold angles to the range [0, π].
-    '''
-    angles = np.asarray(angles)  # Ensure input is an array
-    angles = angles % (2 * np.pi)  # Wrap into [0, 2π)
-
-    # Fold anything > π into [0, π]
-    folded = np.where(angles > np.pi, angles - np.pi, angles)
-
-    return folded.item() if np.isscalar(angles) else folded
-
-def project_image_to_axis(value_img, yaw_rad):
-    """
-    Projects pixels from a depth image onto an axis through the image center at a given yaw angle,
-    and pairs each projection with its corresponding depth value.
-
-    Parameters:
-        depth_image (np.ndarray): 2D depth image.
-        yaw_degrees (float): Yaw angle in degrees.
-
-    Returns:
-        np.ndarray: Array of shape (N, 2) where each row is (normalized_projection, depth_value)
-    """
-    H, W = value_img.shape
-    center = np.array([W / 2.0, H / 2.0])
-
-    # Convert yaw to radians
-    axis = np.array([np.cos(yaw_rad), np.sin(yaw_rad)])
-
-    # Create meshgrid of pixel coordinates
-    x_coords, y_coords = np.meshgrid(np.arange(W), np.arange(H))  # shape: (H, W)
-    coords = np.stack([x_coords - center[0], y_coords - center[1]], axis=2)  # shape: (H, W, 2)
-
-    # Compute projections
-    projections = (coords @ axis).flatten()  # shape: (H, W)
-
-    values = value_img.flatten()
-    return projections, values
- 
