@@ -81,7 +81,8 @@ def create_renderer(width=1920, height=1080):
     renderer.setup_camera(cam_params.intrinsic, cam_params.extrinsic)
 
     material = MaterialRecord()
-    material.shader = "defaultLit"
+    material.shader = "defaultUnlit"
+    # material.shader = "defaultLit"
     
     return renderer, material
 
@@ -136,3 +137,21 @@ def visualize_colored_point_cloud(depth_image, rgb_image, camera_intrinsics):
 
     # Visualize the point cloud
     o3d.visualization.draw_geometries([point_cloud], point_show_normal=True)
+
+def draw_3d_line_on_image(image, line, camera_intrinsics, color=(0, 255, 0), thickness=2):
+    """
+    Draws a 3D line on a 2D image.
+    
+    Parameters:
+    - image: The image on which to draw the line.
+    - start: Start point of the line (x, y).
+    - end: End point of the line (x, y).
+    - color: Color of the line in BGR format.
+    - thickness: Thickness of the line.
+    """
+    start_2d = np.dot(camera_intrinsics, np.array([line[0][0], line[0][1], line[0][2]]))
+    end_2d = np.dot(camera_intrinsics, np.array([line[1][0], line[1][1], line[1][2]]))
+    start_2d = (start_2d[:2] / start_2d[2]).astype(int)
+    end_2d = (end_2d[:2] / end_2d[2]).astype(int)
+    cv2.line(image, tuple(start_2d), tuple(end_2d), color, thickness)
+    return image

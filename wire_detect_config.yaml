@@ -7,10 +7,10 @@ high_canny_threshold: 200
 line_bin_avg_threshold_multiplier: 0.35
 
 # ROI settings
-grad_bin_avg_threshold_multiplier: 0.9
+grad_bin_avg_threshold: 0.05
 
 # RANSAC settings
-ransac_max_iters: 1000
+ransac_max_iters: 500
 inlier_threshold_m: 0.1016
 vert_angle_maximum_rad: 0.0398132
 horz_angle_diff_maximum_rad: 0.0698132
