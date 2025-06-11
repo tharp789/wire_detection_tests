@@ -3,6 +3,7 @@ import cv2
 from scipy.stats import circmean
 from scipy.signal import find_peaks
 import multiprocessing as mp
+import time
 
 class WireDetector:
     def __init__(self, wire_detection_config, camera_intrinsics):
@@ -329,7 +330,10 @@ class WireDetector:
                 self.horz_angle_diff_maximum_rad, self.inlier_threshold_m)
             for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts)
         ]
+        start_time = time.perf_counter()
         results = self.pool.map(process_roi, args_list)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
         for lines, line_inlier_count, points, roi_color in results:
             fitted_lines += lines
             line_inlier_counts += line_inlier_count
