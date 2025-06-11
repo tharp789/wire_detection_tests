@@ -8,15 +8,16 @@ line_bin_avg_threshold_multiplier: 0.35
 
 # ROI settings
 grad_bin_avg_threshold: 0.05
-
-# RANSAC settings
+max_wire_per_roi: 3
 min_depth_clip_m: 0.5
 max_depth_clip_m: 15.0
+
+# RANSAC settings
 ransac_max_iters: 300
-inlier_threshold_m: 0.1016
-# vert_angle_maximum_rad: 0.0398132
-vert_angle_maximum_rad: 0.174533
-horz_angle_diff_maximum_rad: 0.0698132
+inlier_threshold_m: 0.1016 # 4 inches
+# vert_angle_maximum_rad: 0.0872665 # 5 degrees
+vert_angle_maximum_rad: 0.174533 # 10 degrees
+horz_angle_diff_maximum_rad: 0.0698132 # 4 degrees
 
 
 

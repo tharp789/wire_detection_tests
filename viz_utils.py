@@ -138,7 +138,7 @@ def visualize_colored_point_cloud(depth_image, rgb_image, camera_intrinsics):
     # Visualize the point cloud
     o3d.visualization.draw_geometries([point_cloud], point_show_normal=True)
 
-def draw_3d_line_on_image(image, line, camera_intrinsics, color=(0, 255, 0), thickness=2):
+def draw_3d_line_on_image(image, lines, camera_intrinsics, color=(0, 255, 0), thickness=2):
     """
     Draws a 3D line on a 2D image.
     
@@ -149,9 +149,31 @@ def draw_3d_line_on_image(image, line, camera_intrinsics, color=(0, 255, 0), thi
     - color: Color of the line in BGR format.
     - thickness: Thickness of the line.
     """
-    start_2d = np.dot(camera_intrinsics, np.array([line[0][0], line[0][1], line[0][2]]))
-    end_2d = np.dot(camera_intrinsics, np.array([line[1][0], line[1][1], line[1][2]]))
-    start_2d = (start_2d[:2] / start_2d[2]).astype(int)
-    end_2d = (end_2d[:2] / end_2d[2]).astype(int)
-    cv2.line(image, tuple(start_2d), tuple(end_2d), color, thickness)
+    original_size = image.shape[:2]
+    image = cv2.resize(image, (1920, 1080))  # Resize to 1280x720 for better visualization
+    scale = np.array([image.shape[1] / original_size[1], image.shape[0] / original_size[0]])
+
+    for line in lines:
+        start_2d = np.dot(camera_intrinsics, np.array([line[0][0], line[0][1], line[0][2]]))
+        end_2d = np.dot(camera_intrinsics, np.array([line[1][0], line[1][1], line[1][2]]))
+        start_2d = (start_2d[:2] / start_2d[2]).astype(int)
+        end_2d = (end_2d[:2] / end_2d[2]).astype(int)
+        scaled_start_2d = (np.array(start_2d) * scale).astype(int)
+        scaled_end_2d = (np.array(end_2d) * scale).astype(int)
+        cv2.line(image, tuple(scaled_start_2d), tuple(scaled_end_2d), color, thickness)
+
     return image
+
+def make_video(image_files, output_path, fps=10):
+    if not image_files:
+        return
+    # Read the first image to get frame size
+    frame = cv2.imread(image_files[0])
+    height, width, layers = frame.shape
+    video_writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    
+    for img_path in image_files:
+        frame = cv2.imread(img_path)
+        if frame is not None:
+            video_writer.write(frame)
+    video_writer.release()

@@ -15,9 +15,10 @@ class WireDetectorCPU:
         self.line_bin_avg_threshold_multiplier = wire_detection_config['line_bin_avg_threshold_multiplier']
 
         self.grad_bin_avg_threshold = wire_detection_config['grad_bin_avg_threshold']
-
+        self.max_wire_per_roi = wire_detection_config['max_wire_per_roi']
         self.min_depth_clip = wire_detection_config['min_depth_clip_m']
         self.max_depth_clip = wire_detection_config['max_depth_clip_m']
+
         self.ransac_max_iters = wire_detection_config['ransac_max_iters']
         self.inlier_threshold_m = wire_detection_config['inlier_threshold_m']
         self.vert_angle_maximum_rad = wire_detection_config['vert_angle_maximum_rad']
@@ -202,6 +203,9 @@ class WireDetectorCPU:
                     regions_of_interest.append((start, end))
                     roi_line_count.append(line_count)
 
+        # limit the count per region to the max number of wires per ROI
+        roi_line_count = np.array(roi_line_count)
+        roi_line_count = np.clip(roi_line_count, 0, self.max_wire_per_roi)
         return regions_of_interest, roi_line_count
 
     def roi_to_point_clouds(self, rois, avg_angle, depth_image, viz_img=None):
@@ -339,10 +343,17 @@ class WireDetectorCPU:
 
                         d1 = np.linalg.norm(p1 - cp1) + np.linalg.norm(p2 - cp2)
                         d2 = np.linalg.norm(p1 - cp2) + np.linalg.norm(p2 - cp1)
+                        combined_inlier_count = combined_inlier_counts[j]
+                        line_inlier_count = line_inlier_counts[i]
+                        total_inlier_count = combined_inlier_count + line_inlier_count
                         if d1 < d2:
-                            combined_lines[j] = ((cp1 + p1) / 2, (cp2 + p2) / 2)
+                            new_p1 = (cp1 * combined_inlier_count + p1 * line_inlier_count) / total_inlier_count
+                            new_p2 = (cp2 * combined_inlier_count + p2 * line_inlier_count) / total_inlier_count
                         else:
-                            combined_lines[j] = ((cp1 + p2) / 2, (cp2 + p1) / 2)
+                            new_p1 = (cp1 * combined_inlier_count + p2 * line_inlier_count) / total_inlier_count
+                            new_p2 = (cp2 * combined_inlier_count + p1 * line_inlier_count) / total_inlier_count
+
+                        combined_lines[j] = (new_p1, new_p2)
                         combined_inlier_counts[j] += line_inlier_counts[i]
                         break
                 else:
@@ -420,11 +431,11 @@ class WireDetectorCPU:
         # Compute 3D points
         flatted_coord = np.column_stack((x_coords.flatten(), y_coords.flatten(), np.ones_like(x_coords.flatten())))
         z_coords = depth_image.flatten()
+        valid_mask = ~np.isnan(z_coords) & (z_coords > depth_clip[0]) & (z_coords < depth_clip[1])
         inv_camera_intrinsics = np.linalg.inv(self.camera_intrinsics)
 
         rays = np.dot(inv_camera_intrinsics, flatted_coord.T).T
         points = rays * z_coords.reshape(-1, 1)
-        valid_mask = ~np.isnan(z_coords) & (z_coords >= depth_clip[0]) & (z_coords <= depth_clip[1])
         points = points[valid_mask]
         if rgb is not None:
             rgb = rgb.reshape(-1, 3)
