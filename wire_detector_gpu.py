@@ -306,6 +306,7 @@ class WireDetectorGPU:
         """
         avg_angle = fold_angles_from_0_to_pi(avg_angle)
         best_lines = []
+        line_counts = []
         for i in range(num_lines):
             best_inliers_mask = None
             best_inlier_count = 0
@@ -347,10 +348,11 @@ class WireDetectorGPU:
             if best_line is None:
                 break
             best_lines.append(best_line)
+            line_counts.append(best_inlier_count)
 
             if num_lines > 1 and best_inliers_mask is not None:
                 points = points[~best_inliers_mask]
-                if points.shape[0] < 2:
+                if len(points) <= 2:
                     break
 
         # combine lines if there z height is withing the inlier threshold
@@ -374,7 +376,7 @@ class WireDetectorGPU:
                     combined_lines.append(line)
             return combined_lines
 
-        return best_lines
+        return best_lines, line_counts
     
     def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
         """
@@ -402,10 +404,10 @@ class WireDetectorGPU:
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines = self.ransac_line_fitting(points, avg_angle, line_count)
+            lines, line_inlier_counts = self.ransac_line_fitting(points, avg_angle, line_count)
             fitted_lines += lines
 
-        return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
+        return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
     
     def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
         """
@@ -416,9 +418,9 @@ class WireDetectorGPU:
         regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
 
         if generate_viz:
-            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
         else:
-            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
 
         return fitted_lines, rgb_masked
     

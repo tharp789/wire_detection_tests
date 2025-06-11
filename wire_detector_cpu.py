@@ -1,7 +1,6 @@
 import numpy as np
 import cv2
 from scipy.stats import circmean
-from scipy.signal import find_peaks
 
 from wire_detection_utils import fold_angles_from_0_to_pi, perpendicular_angle_rad, project_image_to_axis, peak_hist_into_wires, find_closest_distance_from_points_to_line_3d, get_length_of_center_line_across_image
 
@@ -84,10 +83,6 @@ class WireDetectorCPU:
             self.cx - wire_distances_wrt_center * cos_offset,
             self.cy - wire_distances_wrt_center * sin_offset
         ))
-
-        # dists = np.linalg.norm(seg_coords[:, None] - new_midpoints, axis=2)
-        # closest_indices = np.argmin(dists, axis=0)
-        # wire_midpoints = seg_coords[closest_indices]
 
         # Compute wire lines in a vectorized manner
         new_x0 = wire_midpoints[:, 0] + self.line_length * np.cos(avg_angle)
@@ -281,6 +276,7 @@ class WireDetectorCPU:
         """
         avg_angle = fold_angles_from_0_to_pi(avg_angle)
         best_lines = []
+        line_inlier_counts = []
         for i in range(num_lines):
             best_inliers_mask = None
             best_inlier_count = 0
@@ -322,34 +318,40 @@ class WireDetectorCPU:
             if best_line is None:
                 break
             best_lines.append(best_line)
+            line_inlier_counts.append(best_inlier_count)
 
             if num_lines > 1 and best_inliers_mask is not None:
                 points = points[~best_inliers_mask]
-                if points.shape[0] < 2:
+                if len(points) <= 2:
                     break
 
         # combine lines if there z height is withing the inlier threshold
         if len(best_lines) > 1:
             combined_lines = []
-            for line in best_lines:
+            combined_inlier_counts = []
+            for i, line in enumerate(best_lines):
                 p1, p2 = line
                 avg_height = (p1[2] + p2[2]) / 2
 
-                for i, (cp1, cp2) in enumerate(combined_lines):
+                for j, (cp1, cp2) in enumerate(combined_lines):
                     combined_avg_height = (cp1[2] + cp2[2]) / 2
                     if np.abs(combined_avg_height - avg_height) <= self.inlier_threshold_m * 2:
+
                         d1 = np.linalg.norm(p1 - cp1) + np.linalg.norm(p2 - cp2)
                         d2 = np.linalg.norm(p1 - cp2) + np.linalg.norm(p2 - cp1)
                         if d1 < d2:
-                            combined_lines[i] = ((cp1 + p1) / 2, (cp2 + p2) / 2)
+                            combined_lines[j] = ((cp1 + p1) / 2, (cp2 + p2) / 2)
                         else:
-                            combined_lines[i] = ((cp1 + p2) / 2, (cp2 + p1) / 2)
+                            combined_lines[j] = ((cp1 + p2) / 2, (cp2 + p1) / 2)
+                        combined_inlier_counts[j] += line_inlier_counts[i]
                         break
                 else:
                     combined_lines.append(line)
-            return combined_lines
+                    combined_inlier_counts.append(line_inlier_counts[i])
 
-        return best_lines
+            return combined_lines, combined_inlier_counts
+
+        return best_lines, line_inlier_counts
     
     def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
         """
@@ -365,6 +367,7 @@ class WireDetectorCPU:
             fitted_lines (list): List of fitted lines in 3D.
         """
         fitted_lines = []
+        line_inlier_counts = []
         roi_pcs = []
         roi_point_colors = []
         roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
@@ -377,10 +380,11 @@ class WireDetectorCPU:
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines = self.ransac_line_fitting(points, avg_angle, line_count)
+            lines, line_inlier_count = self.ransac_line_fitting(points, avg_angle, line_count)
             fitted_lines += lines
+            line_inlier_counts += line_inlier_count
 
-        return fitted_lines, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
+        return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
     
     def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
         """
@@ -391,9 +395,9 @@ class WireDetectorCPU:
         regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
 
         if generate_viz:
-            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
         else:
-            fitted_lines, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
 
         return fitted_lines, rgb_masked
     
