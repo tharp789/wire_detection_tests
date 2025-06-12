@@ -21,7 +21,6 @@ class WireDetector:
         self.max_depth_clip = wire_detection_config['max_depth_clip_m']
 
         self.ransac_max_iters = wire_detection_config['ransac_max_iters']
-        self.num_processing_threads = wire_detection_config['num_processing_threads']
         self.inlier_threshold_m = wire_detection_config['inlier_threshold_m']
         self.vert_angle_maximum_rad = wire_detection_config['vert_angle_maximum_rad']
         self.horz_angle_diff_maximum_rad = wire_detection_config['horz_angle_diff_maximum_rad']
@@ -36,8 +35,6 @@ class WireDetector:
         self.cy = None
         self.line_length = None
         self.camera_rays = None
-
-        self.pool = mp.Pool(processes=self.num_processing_threads)
 
     def __del__(self):
         self.pool.close()
@@ -434,38 +431,12 @@ class WireDetector:
         # Compute 3D points
         z_coords = depth_image.flatten()
         valid_mask = ~np.isnan(z_coords) & (z_coords > depth_clip[0]) & (z_coords < depth_clip[1])
-
         points = self.camera_rays * z_coords.reshape(-1, 1)
         points = points[valid_mask]
         if rgb is not None:
             rgb = rgb.reshape(-1, 3)
             rgb = rgb[valid_mask]
         return points, rgb if rgb is not None else None
-
-
-def find_closest_distance_from_points_to_lines_3d(points, lines):
-    assert points.shape[1] == 3, "Points must be 3D"
-    assert lines.shape[1:] == (2, 3), "Lines must be shape (M, 2, 3), get {lines.shape}"
-
-    p1 = lines[:, 0]  # (M, 3)
-    p2 = lines[:, 1]  # (M, 3)
-    line_vecs = p2 - p1  # (M, 3)
-    line_lens_sq = np.sum(line_vecs ** 2, axis=1, keepdims=True)  # (M, 1)
-
-    # Vector from p1 to each point: (M, N, 3)
-    p1_to_points = points[None, :, :] - p1[:, None, :]  # broadcast (M, N, 3)
-
-    # Project onto line vector
-    t = np.sum(p1_to_points * line_vecs[:, None, :], axis=2) / (line_lens_sq + 1e-8)  # (M, N)
-    t = np.clip(t, 0.0, 1.0)
-
-    # Closest point on line: (M, N, 3)
-    closest_points = p1[:, None, :] + t[:, :, None] * line_vecs[:, None, :]
-
-    # Compute distances: (M, N)
-    distances = np.linalg.norm(points[None, :, :] - closest_points, axis=2)
-
-    return distances
 
 def find_closest_distance_from_points_to_line_3d(points, line_ends):
     assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"

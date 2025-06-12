@@ -284,3 +284,27 @@ def ransac_line_fitting(points,
             return combined_lines, combined_inlier_counts
 
         return best_lines, line_inlier_counts
+
+def find_closest_distance_from_points_to_lines_3d(points, lines):
+    assert points.shape[1] == 3, "Points must be 3D"
+    assert lines.shape[1:] == (2, 3), "Lines must be shape (M, 2, 3), get {lines.shape}"
+
+    p1 = lines[:, 0]  # (M, 3)
+    p2 = lines[:, 1]  # (M, 3)
+    line_vecs = p2 - p1  # (M, 3)
+    line_lens_sq = np.sum(line_vecs ** 2, axis=1, keepdims=True)  # (M, 1)
+
+    # Vector from p1 to each point: (M, N, 3)
+    p1_to_points = points[None, :, :] - p1[:, None, :]  # broadcast (M, N, 3)
+
+    # Project onto line vector
+    t = np.sum(p1_to_points * line_vecs[:, None, :], axis=2) / (line_lens_sq + 1e-8)  # (M, N)
+    t = np.clip(t, 0.0, 1.0)
+
+    # Closest point on line: (M, N, 3)
+    closest_points = p1[:, None, :] + t[:, :, None] * line_vecs[:, None, :]
+
+    # Compute distances: (M, N)
+    distances = np.linalg.norm(points[None, :, :] - closest_points, axis=2)
+
+    return distances
