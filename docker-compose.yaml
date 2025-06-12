@@ -1,0 +1,31 @@
+services:
+  base:
+    image: tharp789/hummingbird_demo:autonomy-36-4-0
+    build:
+      context: ./
+      dockerfile: ./Dockerfile.test
+    command: >
+      bash -c "cd /root/wire_detection && python3 -m platform_speed_test.py"
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NDDS_QOS_PROFILE=/root/rti_sensor_qos_profile.xml
+    network_mode: host
+    runtime: nvidia
+    privileged: true
+    ipc: host
+    pid: host
+    stdin_open: true
+    tty: true
+    volumes:
+      - /tmp:/tmp 
+      - /dev:/dev 
+      - /mnt/Storage/wire_tracking_05-07_40fov/:/root/test_data/:rw
+      - ./.:/root/wire_detection:rw
+
+networks:
+  wire_detection_network:
+    driver: bridge
+    internal: true
+    attachable: true

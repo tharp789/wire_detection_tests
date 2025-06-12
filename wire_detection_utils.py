@@ -36,10 +36,6 @@ class WireDetector:
         self.line_length = None
         self.camera_rays = None
 
-    def __del__(self):
-        self.pool.close()
-        self.pool.join()
-
     # virtual method to be implemented by subclasses
     def get_hough_lines(self, rgb_image):
         pass
@@ -50,12 +46,6 @@ class WireDetector:
     # standard functions not depending on gpu or cpu
     def get_line_candidates(self, rgb_image):
         cartesian_lines = self.get_hough_lines(rgb_image)
-        if cartesian_lines is None:
-            return None, None, None
-
-        cartesian_lines = np.squeeze(cartesian_lines, axis=1)
-        if len(cartesian_lines) == 0:
-            return None, None, None
 
         line_angles = np.arctan2(
             cartesian_lines[:, 3] - cartesian_lines[:, 1],

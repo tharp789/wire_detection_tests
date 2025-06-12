@@ -15,15 +15,16 @@ class WireDetectorCPU(WireDetector):
         cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.hough_vote_threshold, minLineLength=self.min_line_threshold, maxLineGap=10)
         if cartesian_lines is None:
             return None
-        else:
-            return cartesian_lines
+        
+        cartesian_lines = np.squeeze(cartesian_lines, axis=1)
+        return cartesian_lines
     
     def get_xy_depth_gradients(self, depth_image):
         """
         Compute the x and y gradients of the depth image using Sobel filters.
         """
-        depth_gradient_x = cv2.Sobel(depth_image, cv2.CV_64F, 1, 0, ksize=11)
-        depth_gradient_y = cv2.Sobel(depth_image, cv2.CV_64F, 0, 1, ksize=11)
+        depth_gradient_x = cv2.Sobel(depth_image, cv2.CV_32F, 1, 0, ksize=11)
+        depth_gradient_y = cv2.Sobel(depth_image, cv2.CV_32F, 0, 1, ksize=11)
         return depth_gradient_x, depth_gradient_y
 
 class WireDetectorGPU(WireDetector):
@@ -37,7 +38,7 @@ class WireDetectorGPU(WireDetector):
 
         # Persistent CUDA filters
         self.canny_detector = cv2.cuda.createCannyEdgeDetector(
-            self.low_canny_threshold, self.high_canny_threshold, apertureSize=3
+            self.low_canny_threshold, self.high_canny_threshold, apperture_size=3
         )
         self.hough_detector = cv2.cuda.createHoughSegmentDetector(
             rho=1,
@@ -60,11 +61,13 @@ class WireDetectorGPU(WireDetector):
             return None
         else:
             cartesian_lines = gpu_lines.download()
+            cartesian_lines = np.squeeze(cartesian_lines, axis=0)
             return cartesian_lines
     
     def get_xy_depth_gradients(self, depth_image):
-        depth_gradient_x = self.sobel_x.apply(depth_image)
-        depth_gradient_y = self.sobel_y.apply(depth_image)
+        self.gpu_depth.upload(depth_image)
+        depth_gradient_x = self.sobel_x.apply(self.gpu_depth)
+        depth_gradient_y = self.sobel_y.apply(self.gpu_depth)
         depth_gradient_x = depth_gradient_x.download()
         depth_gradient_y = depth_gradient_y.download()
         return depth_gradient_x, depth_gradient_y
