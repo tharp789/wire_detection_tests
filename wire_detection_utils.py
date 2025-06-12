@@ -6,7 +6,7 @@ import multiprocessing as mp
 import time
 
 class WireDetector:
-    def __init__(self, wire_detection_config, camera_intrinsics):
+    def __init__(self, wire_detection_config, camera_intrinsics, image_shape=None, depth_image=None):
 
         self.hough_vote_threshold = wire_detection_config['hough_vote_threshold']
         self.min_line_threshold = wire_detection_config['min_line_threshold']
@@ -35,6 +35,7 @@ class WireDetector:
         self.cx = None
         self.cy = None
         self.line_length = None
+        self.camera_rays = None
 
         self.pool = mp.Pool(processes=self.num_processing_threads)
 
@@ -71,6 +72,10 @@ class WireDetector:
             self.img_height, self.img_width = self.img_shape
             self.cx, self.cy = self.img_width // 2, self.img_height // 2
             self.line_length = max(self.img_width, self.img_height) * 2
+            # Create meshgrid of pixel coordinates
+            x_coords, y_coords = np.meshgrid(np.arange(self.img_width), np.arange(self.img_height))  # shape: (H, W)
+            flatted_coord = np.column_stack((x_coords.flatten(), y_coords.flatten(), np.ones_like(x_coords.flatten())))
+            self.camera_rays = np.dot(self.inv_camera_intrinsics, flatted_coord.T).T        
 
         cos_avg, sin_avg = np.cos(avg_angle), np.sin(avg_angle)
         x0_avg = int(self.cx + self.line_length * cos_avg)
@@ -269,120 +274,7 @@ class WireDetector:
         else:
             return roi_depths, None, None, None
     
-    def ransac_on_rois_sync(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
-        """
-        Find wires in 3D from the regions of interest.
-
-        Parameters:
-            roi_depths (list): List of depth images for each ROI.
-            roi_rgbs (list): List of RGB images for each ROI.
-            avg_angle (float): Average angle of the wires in radians.
-            roi_line_count (list): List of line counts for each ROI.
-
-        Returns:
-            fitted_lines (list): List of fitted lines in 3D.
-        """
-        fitted_lines = []
-        line_inlier_counts = []
-        roi_pcs = []
-        roi_point_colors = []
-        roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
-        if roi_rgbs is None:
-            roi_rgbs = [None] * len(roi_depths)
-        for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
-            lines, line_inlier_count, points, roi_color = process_roi(
-                (self.inv_camera_intrinsics, roi_depth, roi_rgb, line_count, avg_angle,
-                 self.min_depth_clip, self.max_depth_clip, 
-                 self.ransac_max_iters, self.vert_angle_maximum_rad, 
-                 self.horz_angle_diff_maximum_rad, self.inlier_threshold_m)
-            )
-            fitted_lines += lines
-            line_inlier_counts += line_inlier_count
-            roi_pcs.append(points)
-            roi_point_colors.append(roi_color)
-
-        return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
-
-    def ransac_on_rois_async(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
-        """
-        Find wires in 3D from the regions of interest.
-
-        Parameters:
-            roi_depths (list): List of depth images for each ROI.
-            roi_rgbs (list): List of RGB images for each ROI.
-            avg_angle (float): Average angle of the wires in radians.
-            roi_line_count (list): List of line counts for each ROI.
-
-        Returns:
-            fitted_lines (list): List of fitted lines in 3D.
-        """
-        fitted_lines = []
-        line_inlier_counts = []
-        roi_pcs = []
-        roi_point_colors = []
-        roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
-        if roi_rgbs is None:
-            roi_rgbs = [None] * len(roi_depths)
-        args_list = [
-            (self.inv_camera_intrinsics, roi_depth, roi_rgb, line_count, avg_angle,
-                self.min_depth_clip, self.max_depth_clip, 
-                self.ransac_max_iters, self.vert_angle_maximum_rad, 
-                self.horz_angle_diff_maximum_rad, self.inlier_threshold_m)
-            for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts)
-        ]
-        start_time = time.perf_counter()
-        results = self.pool.map(process_roi, args_list)
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        for lines, line_inlier_count, points, roi_color in results:
-            fitted_lines += lines
-            line_inlier_counts += line_inlier_count
-            roi_pcs.append(points)
-            roi_point_colors.append(roi_color)
-        # Filter out None values from roi_point_colors
-        roi_point_colors = [color for color in roi_point_colors if color is not None]
-        if not fitted_lines:
-            return [], [], [], None, masked_viz_img if viz_img is not None else None
-        
-        return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
-    
-    def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
-        """
-        Find wires in 3D from the RGB and depth images.
-        """
-        wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = self.detect_wires_2d(rgb_image)
-
-        regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
-
-        if generate_viz:
-            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois_sync(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
-        else:
-            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois_sync(regions_of_interest, roi_line_counts, avg_angle, depth_image)
-
-        return fitted_lines, rgb_masked
-
-def process_roi(args):
-    inv_camera_intrinsics, roi_depth, roi_rgb, line_count, avg_angle, min_depth, max_depth, \
-        ransac_max_iters, vert_angle_maximum_rad, horz_angle_diff_maximum_rad, inlier_threshold_m = args
-    points, colors = depth_to_pointcloud(roi_depth, inv_camera_intrinsics, rgb=roi_rgb, depth_clip=[min_depth, max_depth])
-    roi_point_colors = None
-    if colors is not None:
-        roi_point_colors = (np.array(colors) / 255.0)[:, ::-1]
-    lines, line_inlier_count = ransac_line_fitting(points, avg_angle, line_count, 
-                                                    ransac_max_iters=ransac_max_iters,
-                                                    vert_angle_maximum_rad=vert_angle_maximum_rad,
-                                                    horz_angle_diff_maximum_rad=horz_angle_diff_maximum_rad,
-                                                    inlier_threshold_m=inlier_threshold_m)
-    return lines, line_inlier_count, points, roi_point_colors
-
-def ransac_line_fitting(points, 
-                        avg_angle, 
-                        num_lines, 
-                        ransac_max_iters=1000,
-                        vert_angle_maximum_rad=np.pi / 4,
-                        horz_angle_diff_maximum_rad=np.pi / 4,
-                        inlier_threshold_m=0.05):
-
+    def ransac_line_fitting(self, points, avg_angle, num_lines):
         """
         RANSAC line fitting algorithm.
 
@@ -402,14 +294,14 @@ def ransac_line_fitting(points,
             best_inlier_count = 0
             best_line = None
 
-            for _ in range(ransac_max_iters):
+            for _ in range(self.ransac_max_iters):
                 # Randomly select two points
                 sample_indices = np.random.choice(points.shape[0], 2, replace=False)
                 p1, p2 = points[sample_indices]
                 
                 pitch_angle = np.arctan2(np.abs(p2[2] - p1[2]), np.linalg.norm(p2[:2] - p1[:2]))
                 pitch_angle = fold_angles_from_0_to_pi(pitch_angle)
-                if pitch_angle > vert_angle_maximum_rad and pitch_angle < np.pi - vert_angle_maximum_rad:
+                if pitch_angle > self.vert_angle_maximum_rad and pitch_angle < np.pi - self.vert_angle_maximum_rad:
                     continue
 
                 yaw_angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
@@ -418,14 +310,14 @@ def ransac_line_fitting(points,
                 angle_diff = np.abs(yaw_angle - avg_angle)
                 if angle_diff > np.pi / 2:
                     angle_diff = np.abs(np.pi - angle_diff)
-                if angle_diff > horz_angle_diff_maximum_rad:
+                if angle_diff > self.horz_angle_diff_maximum_rad:
                     continue
 
                 # Calculate line parameters
                 distances = find_closest_distance_from_points_to_line_3d(points, np.array([p1, p2]))
 
                 # Find inliers
-                inlier_mask = distances <= inlier_threshold_m
+                inlier_mask = distances <= self.inlier_threshold_m
                 inlier_count = np.count_nonzero(inlier_mask)
 
                 # Update best line if current one has more inliers
@@ -455,7 +347,7 @@ def ransac_line_fitting(points,
 
                 for j, (cp1, cp2) in enumerate(combined_lines):
                     combined_avg_height = (cp1[2] + cp2[2]) / 2
-                    if np.abs(combined_avg_height - avg_height) <= inlier_threshold_m * 2:
+                    if np.abs(combined_avg_height - avg_height) <= self.inlier_threshold_m * 2:
 
                         d1 = np.linalg.norm(p1 - cp1) + np.linalg.norm(p2 - cp2)
                         d2 = np.linalg.norm(p1 - cp2) + np.linalg.norm(p2 - cp1)
@@ -479,57 +371,101 @@ def ransac_line_fitting(points,
             return combined_lines, combined_inlier_counts
 
         return best_lines, line_inlier_counts
+    
+    def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
+        """
+        Find wires in 3D from the regions of interest.
 
-def depth_to_pointcloud(depth_image, inv_camera_intrinsics, rgb=None, depth_clip=[0.5, 10.0]):
-    """
-    Convert a depth image to a 3D point cloud.
+        Parameters:
+            roi_depths (list): List of depth images for each ROI.
+            roi_rgbs (list): List of RGB images for each ROI.
+            avg_angle (float): Average angle of the wires in radians.
+            roi_line_count (list): List of line counts for each ROI.
 
-    Parameters:
-        depth_image (np.ndarray): 2D depth image.
-        camera_intrinsics (np.ndarray): Camera intrinsic matrix.
+        Returns:
+            fitted_lines (list): List of fitted lines in 3D.
+        """
+        fitted_lines = []
+        line_inlier_counts = []
+        roi_pcs = []
+        roi_point_colors = []
+        roi_depths, depth_img_masked, roi_rgbs, masked_viz_img = self.roi_to_point_clouds(rois, avg_angle, depth_image, viz_img=viz_img)
+        if roi_rgbs is None:
+            roi_rgbs = [None] * len(roi_depths)
+        for roi_depth, roi_rgb, line_count in zip(roi_depths, roi_rgbs, roi_line_counts):
+            # convert depth image to point cloud
+            points, colors = self.depth_to_pointcloud(roi_depth, rgb=roi_rgb, depth_clip=[self.min_depth_clip, self.max_depth_clip])
+            roi_pcs.append(points)
+            if colors is not None:
+                colors = (np.array(colors) / 255.0)[:,::-1]
+                roi_point_colors.append(colors)
+            lines, line_inlier_count = self.ransac_line_fitting(points, avg_angle, line_count)
+            fitted_lines += lines
+            line_inlier_counts += line_inlier_count
 
-    Returns:
-        np.ndarray: 3D point cloud of shape (N, 3).
-    """
-    H, W = depth_image.shape
+        return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
+    
+    def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
+        """
+        Find wires in 3D from the RGB and depth images.
+        """
+        wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = self.detect_wires_2d(rgb_image)
 
-    # Create meshgrid of pixel coordinates
-    x_coords, y_coords = np.meshgrid(np.arange(W), np.arange(H))  # shape: (H, W)
+        regions_of_interest, roi_line_counts = self.find_regions_of_interest(depth_image, avg_angle, midpoint_dists_wrt_center)
 
-    # Compute 3D points
-    flatted_coord = np.column_stack((x_coords.flatten(), y_coords.flatten(), np.ones_like(x_coords.flatten())))
-    z_coords = depth_image.flatten()
-    valid_mask = ~np.isnan(z_coords) & (z_coords > depth_clip[0]) & (z_coords < depth_clip[1])
+        if generate_viz:
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image, viz_img=rgb_image)
+        else:
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = self.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_image)
 
-    rays = np.dot(inv_camera_intrinsics, flatted_coord.T).T
-    points = rays * z_coords.reshape(-1, 1)
-    points = points[valid_mask]
-    if rgb is not None:
-        rgb = rgb.reshape(-1, 3)
-        rgb = rgb[valid_mask]
-    return points, rgb if rgb is not None else None
+        return fitted_lines, rgb_masked
+    
+    def depth_to_pointcloud(self, depth_image, rgb=None, depth_clip=[0.5, 10.0]):
+        """
+        Convert a depth image to a 3D point cloud.
 
-def peak_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
-    """
-    Computes average distances within histogram peaks whose counts exceed a threshold.
+        Parameters:
+            depth_image (np.ndarray): 2D depth image.
+            camera_intrinsics (np.ndarray): Camera intrinsic matrix.
 
-    Parameters:
-        hist (np.ndarray): Histogram counts.
-        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
-        distances_wrt_center (np.ndarray): Original distances.
-        bin_threshold (float): Minimum bin count to consider.
+        Returns:
+            np.ndarray: 3D point cloud of shape (N, 3).
+        """
+        # Compute 3D points
+        z_coords = depth_image.flatten()
+        valid_mask = ~np.isnan(z_coords) & (z_coords > depth_clip[0]) & (z_coords < depth_clip[1])
 
-    Returns:
-        np.ndarray: Filtered average distances for valid peaks.
-    """
-    # Find peaks in the histogram
-    peaks, _ = find_peaks(hist, height=bin_threshold)
+        points = self.camera_rays * z_coords.reshape(-1, 1)
+        points = points[valid_mask]
+        if rgb is not None:
+            rgb = rgb.reshape(-1, 3)
+            rgb = rgb[valid_mask]
+        return points, rgb if rgb is not None else None
 
-    # Find the corresponding bin center for each peak
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    distances = bin_centers[peaks]
 
-    return np.array(distances)
+def find_closest_distance_from_points_to_lines_3d(points, lines):
+    assert points.shape[1] == 3, "Points must be 3D"
+    assert lines.shape[1:] == (2, 3), "Lines must be shape (M, 2, 3), get {lines.shape}"
+
+    p1 = lines[:, 0]  # (M, 3)
+    p2 = lines[:, 1]  # (M, 3)
+    line_vecs = p2 - p1  # (M, 3)
+    line_lens_sq = np.sum(line_vecs ** 2, axis=1, keepdims=True)  # (M, 1)
+
+    # Vector from p1 to each point: (M, N, 3)
+    p1_to_points = points[None, :, :] - p1[:, None, :]  # broadcast (M, N, 3)
+
+    # Project onto line vector
+    t = np.sum(p1_to_points * line_vecs[:, None, :], axis=2) / (line_lens_sq + 1e-8)  # (M, N)
+    t = np.clip(t, 0.0, 1.0)
+
+    # Closest point on line: (M, N, 3)
+    closest_points = p1[:, None, :] + t[:, :, None] * line_vecs[:, None, :]
+
+    # Compute distances: (M, N)
+    distances = np.linalg.norm(points[None, :, :] - closest_points, axis=2)
+
+    return distances
 
 def find_closest_distance_from_points_to_line_3d(points, line_ends):
     assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"
@@ -553,6 +489,28 @@ def find_closest_distance_from_points_to_line_3d(points, line_ends):
     distances = np.linalg.norm(points - closest_points, axis=1)
     
     return distances
+
+def peak_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
+    """
+    Computes average distances within histogram peaks whose counts exceed a threshold.
+
+    Parameters:
+        hist (np.ndarray): Histogram counts.
+        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
+        distances_wrt_center (np.ndarray): Original distances.
+        bin_threshold (float): Minimum bin count to consider.
+
+    Returns:
+        np.ndarray: Filtered average distances for valid peaks.
+    """
+    # Find peaks in the histogram
+    peaks, _ = find_peaks(hist, height=bin_threshold)
+
+    # Find the corresponding bin center for each peak
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    distances = bin_centers[peaks]
+
+    return np.array(distances)
 
 def get_length_of_center_line_across_image(image_height, image_width, angle):
     assert isinstance(image_height, int) and isinstance(image_width, int), "Image dimensions must be integers"

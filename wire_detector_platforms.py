@@ -3,7 +3,7 @@ import cv2
 from scipy.stats import circmean
 from scipy.signal import find_peaks
 
-from wire_detection_utils import WireDetector, fold_angles_from_0_to_pi, perpendicular_angle_rad, get_length_of_center_line_across_image, peak_hist_into_wires, project_image_to_axis, find_closest_distance_from_points_to_line_3d
+from wire_detection_utils import WireDetector
 
 class WireDetectorCPU(WireDetector):
     def __init__(self, wire_detection_config, camera_intrinsics):
