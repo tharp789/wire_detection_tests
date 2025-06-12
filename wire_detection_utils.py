@@ -2,8 +2,6 @@ import numpy as np
 import cv2
 from scipy.stats import circmean
 from scipy.signal import find_peaks
-import multiprocessing as mp
-import time
 
 class WireDetector:
     def __init__(self, wire_detection_config, camera_intrinsics, image_shape=None, depth_image=None):
@@ -35,7 +33,7 @@ class WireDetector:
         self.cy = None
         self.line_length = None
         self.camera_rays = None
-
+        
     # virtual method to be implemented by subclasses
     def get_hough_lines(self, rgb_image):
         pass
