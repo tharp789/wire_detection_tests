@@ -1,6 +1,7 @@
 
 
 
+
 # vecotrized ransac, turns out to be slower than the non-vectorized version
 def ransac_line_fitting(points, 
                         avg_angle, 

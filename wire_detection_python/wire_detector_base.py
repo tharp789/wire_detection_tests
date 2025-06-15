@@ -3,8 +3,12 @@ import cv2
 from scipy.stats import circmean
 from scipy.signal import find_peaks
 
+import wire_detection_utils as wdu
+
+from ransac_cpp import ransac_line_fitting
+
 class WireDetector:
-    def __init__(self, wire_detection_config, camera_intrinsics, image_shape=None, depth_image=None):
+    def __init__(self, wire_detection_config, camera_intrinsics):
 
         self.hough_vote_threshold = wire_detection_config['hough_vote_threshold']
         self.min_line_threshold = wire_detection_config['min_line_threshold']
@@ -49,7 +53,7 @@ class WireDetector:
             cartesian_lines[:, 3] - cartesian_lines[:, 1],
             cartesian_lines[:, 2] - cartesian_lines[:, 0]
         )
-        avg_angles = fold_angles_from_0_to_pi(line_angles)
+        avg_angles = wdu.fold_angles_from_0_to_pi(line_angles)
         avg_angle = circmean(avg_angles, high=np.pi, low=-np.pi)
 
         if self.img_shape is None:
@@ -71,9 +75,9 @@ class WireDetector:
         return cartesian_lines, center_line, avg_angle
 
     def get_line_instance_locations(self, cartesian_lines, center_line, avg_angle):
-        perp_angle = perpendicular_angle_rad(avg_angle)
-        image_perp_distance = get_length_of_center_line_across_image(self.img_height, self.img_width, perp_angle)
-        bins = np.arange(- image_perp_distance // 2, image_perp_distance // 2 + self.pixel_binning_size, self.pixel_binning_size)
+        perp_angle = wdu.perpendicular_angle_rad(avg_angle)
+        image_perp_distance = wdu.get_length_of_center_line_across_image(self.img_height, self.img_width, perp_angle)
+        bins = np.arange(- image_perp_distance // 2, image_perp_distance // 2 + 1, 1)
 
         pixel_dists_wrt_center = self.compute_perpendicular_distance(center_line, cartesian_lines)
         hist, bin_edges = np.histogram(pixel_dists_wrt_center, bins=bins)
@@ -81,7 +85,7 @@ class WireDetector:
         # find a threshold for where to count wire peaks based on count
         bin_threshold = self.line_bin_avg_threshold_multiplier * np.mean(hist[hist > 0])
 
-        wire_distances_wrt_center = peak_hist_into_wires(hist, bin_edges, pixel_dists_wrt_center, bin_threshold) * -1 # flipping the sign to match the direction of the center line
+        wire_distances_wrt_center = wdu.peak_hist_into_wires(hist, bin_edges, pixel_dists_wrt_center, bin_threshold) * -1 # flipping the sign to match the direction of the center line
 
         sin_offset, cos_offset = np.sin(avg_angle + np.pi / 2), np.cos(avg_angle + np.pi / 2)
         wire_midpoints = np.column_stack((
@@ -98,14 +102,6 @@ class WireDetector:
         wire_lines = np.column_stack((new_x0, new_y0, new_x1, new_y1)).astype(int)
 
         return wire_lines, wire_midpoints, hist, bin_edges, bin_threshold, wire_distances_wrt_center
-    
-    def get_pixels_from_lines(self, lines):
-        img_mask = np.zeros((self.img_height, self.img_width), dtype=np.uint8)
-        for x1, y1, x2, y2 in lines:
-            cv2.line(img_mask, (x1, y1), (x2, y2), 255, 1)
-        pixels = np.argwhere(img_mask == 255)
-        pixels = pixels[:, [1, 0]]  # Convert to (x, y) format
-        return pixels
     
     def compute_perpendicular_distance(self, center_line, lines):
         """
@@ -124,7 +120,7 @@ class WireDetector:
         C = x2 * y1 - x1 * y2
         
         # Extract pixel coordinates
-        pixels = self.get_pixels_from_lines(lines)
+        pixels = wdu.get_pixels_from_lines(lines, self.img_height, self.img_width)
         x0 = pixels[:, 0]
         y0 = pixels[:, 1]
         
@@ -147,10 +143,10 @@ class WireDetector:
     
     def find_regions_of_interest(self, depth, avg_angle, midpoint_dists_wrt_center, viz_img=None):
         depth_gradient_x, depth_gradient_y = self.get_xy_depth_gradients(depth)
-        perp_angle = perpendicular_angle_rad(avg_angle)
+        perp_angle = wdu.perpendicular_angle_rad(avg_angle)
         depth_gradient = depth_gradient_x * np.cos(perp_angle) + depth_gradient_y * np.sin(perp_angle)
 
-        distance, depth_gradient_1d = project_image_to_axis(depth_gradient, perp_angle)
+        distance, depth_gradient_1d = wdu.project_image_to_axis(depth_gradient, perp_angle)
         depth_gradient_1d = np.abs(depth_gradient_1d)
         depth_gradient_1d = depth_gradient_1d / np.max(depth_gradient_1d)
 
@@ -218,7 +214,7 @@ class WireDetector:
         if viz_img is not None:
             viz_mask = np.zeros(viz_img.shape[:2], dtype=np.uint8)
 
-        perp_angle = perpendicular_angle_rad(avg_angle)  # Get the perpendicular angle in radians
+        perp_angle = wdu.perpendicular_angle_rad(avg_angle)  # Get the perpendicular angle in radians
 
         # Example angle in radians
         # Make sure avg_angle is in radians — if it's in degrees, convert with np.radians()
@@ -259,104 +255,6 @@ class WireDetector:
         else:
             return roi_depths, None, None, None
     
-    def ransac_line_fitting(self, points, avg_angle, num_lines):
-        """
-        RANSAC line fitting algorithm.
-
-        Parameters:
-            points (np.ndarray): Array of shape (N, 2) where each row is a point (x, y).
-            num_iterations (int): Number of RANSAC iterations.
-            threshold (float): Distance threshold to consider a point as an inlier.
-
-        Returns:
-            tuple: Best line parameters (slope, intercept) and inliers.
-        """
-        avg_angle = fold_angles_from_0_to_pi(avg_angle)
-        best_lines = []
-        line_inlier_counts = []
-        for i in range(num_lines):
-            best_inliers_mask = None
-            best_inlier_count = 0
-            best_line = None
-
-            for _ in range(self.ransac_max_iters):
-                # Randomly select two points
-                sample_indices = np.random.choice(points.shape[0], 2, replace=False)
-                p1, p2 = points[sample_indices]
-                
-                pitch_angle = np.arctan2(np.abs(p2[2] - p1[2]), np.linalg.norm(p2[:2] - p1[:2]))
-                pitch_angle = fold_angles_from_0_to_pi(pitch_angle)
-                if pitch_angle > self.vert_angle_maximum_rad and pitch_angle < np.pi - self.vert_angle_maximum_rad:
-                    continue
-
-                yaw_angle = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
-                yaw_angle = fold_angles_from_0_to_pi(yaw_angle)
-                
-                angle_diff = np.abs(yaw_angle - avg_angle)
-                if angle_diff > np.pi / 2:
-                    angle_diff = np.abs(np.pi - angle_diff)
-                if angle_diff > self.horz_angle_diff_maximum_rad:
-                    continue
-
-                # Calculate line parameters
-                distances = find_closest_distance_from_points_to_line_3d(points, np.array([p1, p2]))
-
-                # Find inliers
-                inlier_mask = distances <= self.inlier_threshold_m
-                inlier_count = np.count_nonzero(inlier_mask)
-
-                # Update best line if current one has more inliers
-                if inlier_count > best_inlier_count:
-                    best_inlier_count = inlier_count
-                    best_line = (p1, p2)
-                    best_inliers_mask = inlier_mask
-            
-            # Remove inliers from the dataset for the next iteration
-            if best_line is None:
-                break
-            best_lines.append(best_line)
-            line_inlier_counts.append(best_inlier_count)
-
-            if num_lines > 1 and best_inliers_mask is not None:
-                points = points[~best_inliers_mask]
-                if len(points) <= 2:
-                    break
-
-        # combine lines if there z height is withing the inlier threshold
-        if len(best_lines) > 1:
-            combined_lines = []
-            combined_inlier_counts = []
-            for i, line in enumerate(best_lines):
-                p1, p2 = line
-                avg_height = (p1[2] + p2[2]) / 2
-
-                for j, (cp1, cp2) in enumerate(combined_lines):
-                    combined_avg_height = (cp1[2] + cp2[2]) / 2
-                    if np.abs(combined_avg_height - avg_height) <= self.inlier_threshold_m * 2:
-
-                        d1 = np.linalg.norm(p1 - cp1) + np.linalg.norm(p2 - cp2)
-                        d2 = np.linalg.norm(p1 - cp2) + np.linalg.norm(p2 - cp1)
-                        combined_inlier_count = combined_inlier_counts[j]
-                        line_inlier_count = line_inlier_counts[i]
-                        total_inlier_count = combined_inlier_count + line_inlier_count
-                        if d1 < d2:
-                            new_p1 = (cp1 * combined_inlier_count + p1 * line_inlier_count) / total_inlier_count
-                            new_p2 = (cp2 * combined_inlier_count + p2 * line_inlier_count) / total_inlier_count
-                        else:
-                            new_p1 = (cp1 * combined_inlier_count + p2 * line_inlier_count) / total_inlier_count
-                            new_p2 = (cp2 * combined_inlier_count + p1 * line_inlier_count) / total_inlier_count
-
-                        combined_lines[j] = (new_p1, new_p2)
-                        combined_inlier_counts[j] += line_inlier_counts[i]
-                        break
-                else:
-                    combined_lines.append(line)
-                    combined_inlier_counts.append(line_inlier_counts[i])
-
-            return combined_lines, combined_inlier_counts
-
-        return best_lines, line_inlier_counts
-    
     def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
         """
         Find wires in 3D from the regions of interest.
@@ -384,7 +282,9 @@ class WireDetector:
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines, line_inlier_count = self.ransac_line_fitting(points, avg_angle, line_count)
+            lines, line_inlier_count = ransac_line_fitting(points.astype(np.float64), float(avg_angle), int(line_count), int(self.ransac_max_iters),
+                                                float(self.inlier_threshold_m), float(self.vert_angle_maximum_rad), float(self.horz_angle_diff_maximum_rad))
+
             fitted_lines += lines
             line_inlier_counts += line_inlier_count
 
@@ -425,107 +325,3 @@ class WireDetector:
             rgb = rgb.reshape(-1, 3)
             rgb = rgb[valid_mask]
         return points, rgb if rgb is not None else None
-
-def find_closest_distance_from_points_to_line_3d(points, line_ends):
-    assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"
-    assert line_ends.shape[1] == 3 and line_ends.shape[0] == 2, f"Line ends must be 3D points, got shape {line_ends.shape}"
-
-    p1, p2 = line_ends
-    line_vector = p2 - p1
-    line_length_squared = np.dot(line_vector, line_vector)
-
-    # Vector from p1 to each point
-    p1_to_points = points - p1
-    t = np.dot(p1_to_points, line_vector) / line_length_squared
-
-    # Clamp t to the range [0, 1]
-    t_clamped = np.clip(t, 0, 1)
-
-    # Find the closest point on the line segment
-    closest_points = p1 + t_clamped[:, np.newaxis] * line_vector
-
-    # Calculate distances from points to the closest points on the line segment
-    distances = np.linalg.norm(points - closest_points, axis=1)
-    
-    return distances
-
-def peak_hist_into_wires(hist, bin_edges, distances_wrt_center, bin_threshold):
-    """
-    Computes average distances within histogram peaks whose counts exceed a threshold.
-
-    Parameters:
-        hist (np.ndarray): Histogram counts.
-        bin_edges (np.ndarray): Histogram bin edges (length should be len(hist)+1).
-        distances_wrt_center (np.ndarray): Original distances.
-        bin_threshold (float): Minimum bin count to consider.
-
-    Returns:
-        np.ndarray: Filtered average distances for valid peaks.
-    """
-    # Find peaks in the histogram
-    peaks, _ = find_peaks(hist, height=bin_threshold)
-
-    # Find the corresponding bin center for each peak
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    distances = bin_centers[peaks]
-
-    return np.array(distances)
-
-def get_length_of_center_line_across_image(image_height, image_width, angle):
-    assert isinstance(image_height, int) and isinstance(image_width, int), "Image dimensions must be integers"
-    assert isinstance(angle, (int, float)), "Angle must be a scalar"
-
-    # Calculate the length of the center line across the image
-    angle = fold_angles_from_0_to_pi(angle)
-    cos_angle = np.cos(angle)
-    sin_angle = np.sin(angle)
-
-    length = np.sqrt((image_height * sin_angle) ** 2 + (image_width * cos_angle) ** 2)
-    return length
-
-def perpendicular_angle_rad(angle_rad):
-    perp_angle = fold_angles_from_0_to_pi(angle_rad + np.pi / 2)
-    if perp_angle > np.pi / 2:
-        perp_angle -= np.pi
-    return perp_angle
-    
-def fold_angles_from_0_to_pi(angles):
-    '''
-    Fold angles to the range [0, π].
-    '''
-    angles = np.asarray(angles)  # Ensure input is an array
-    angles = angles % (2 * np.pi)  # Wrap into [0, 2π)
-
-    # Fold anything > π into [0, π]
-    folded = np.where(angles > np.pi, angles - np.pi, angles)
-
-    return folded.item() if np.isscalar(angles) else folded
-
-def project_image_to_axis(value_img, yaw_rad):
-    """
-    Projects pixels from a depth image onto an axis through the image center at a given yaw angle,
-    and pairs each projection with its corresponding depth value.
-
-    Parameters:
-        depth_image (np.ndarray): 2D depth image.
-        yaw_degrees (float): Yaw angle in degrees.
-
-    Returns:
-        np.ndarray: Array of shape (N, 2) where each row is (normalized_projection, depth_value)
-    """
-    H, W = value_img.shape
-    center = np.array([W / 2.0, H / 2.0])
-
-    # Convert yaw to radians
-    axis = np.array([np.cos(yaw_rad), np.sin(yaw_rad)])
-
-    # Create meshgrid of pixel coordinates
-    x_coords, y_coords = np.meshgrid(np.arange(W), np.arange(H))  # shape: (H, W)
-    coords = np.stack([x_coords - center[0], y_coords - center[1]], axis=2)  # shape: (H, W, 2)
-
-    # Compute projections
-    projections = (coords @ axis).flatten()  # shape: (H, W)
-
-    values = value_img.flatten()
-    return projections, values
- 
