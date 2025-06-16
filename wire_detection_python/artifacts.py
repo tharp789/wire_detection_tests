@@ -1,6 +1,9 @@
 
 
+import numpy as np
 
+def fold_angles_from_0_to_pi(angles):
+    pass
 
 # vecotrized ransac, turns out to be slower than the non-vectorized version
 def ransac_line_fitting(points, 
@@ -308,4 +311,27 @@ def find_closest_distance_from_points_to_lines_3d(points, lines):
     # Compute distances: (M, N)
     distances = np.linalg.norm(points[None, :, :] - closest_points, axis=2)
 
+    return distances
+
+def find_closest_distance_from_points_to_line_3d(points, line_ends):
+    assert points.shape[1] == 3, f"Points must be 3D, got shape {points.shape}"
+    assert line_ends.shape[1] == 3 and line_ends.shape[0] == 2, f"Line ends must be 3D points, got shape {line_ends.shape}"
+
+    p1, p2 = line_ends
+    line_vector = p2 - p1
+    line_length_squared = np.dot(line_vector, line_vector)
+
+    # Vector from p1 to each point
+    p1_to_points = points - p1
+    t = np.dot(p1_to_points, line_vector) / line_length_squared
+
+    # Clamp t to the range [0, 1]
+    t_clamped = np.clip(t, 0, 1)
+
+    # Find the closest point on the line segment
+    closest_points = p1 + t_clamped[:, np.newaxis] * line_vector
+
+    # Calculate distances from points to the closest points on the line segment
+    distances = np.linalg.norm(points - closest_points, axis=1)
+    
     return distances

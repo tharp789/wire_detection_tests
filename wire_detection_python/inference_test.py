@@ -4,8 +4,7 @@ import time
 import os
 import yaml
 
-from wire_detector_platforms import WireDetectorCPU, WireDetectorGPU
-from ransac_cpp import ransac_on_rois
+from wire_detector_platforms import WireDetectorCPU
 
 with open('wire_detection_python/wire_detect_config.yaml', 'r') as file:
     detection_config = yaml.safe_load(file)
@@ -57,8 +56,7 @@ camera_intrinsics[0, 2] *= input_image_size[0] / original_image_size[0]
 camera_intrinsics[1, 2] *= input_image_size[1] / original_image_size[1]
 
 iterations = 100
-wire_detector_cpu = WireDetectorCPU(detection_config, camera_intrinsics)
-wire_detector_gpu = WireDetectorGPU(detection_config, camera_intrinsics)
+wire_detector = WireDetectorCPU(detection_config, camera_intrinsics)
 
 print("Starting CPU detection...")
 cpu_detection_time = 0
@@ -69,31 +67,19 @@ for i in range(iterations):
 # Create segmentation mask
     total_start_time = time.perf_counter()
     start_time_cpu = time.perf_counter()
-    wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector_cpu.detect_wires_2d(img)
+    wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector.detect_wires_2d(img)
     end_time_cpu = time.perf_counter()
     cpu_detection_time += (end_time_cpu - start_time_cpu)
 
     start_time_cpu = time.perf_counter()
-    regions_of_interest, roi_line_counts = wire_detector_cpu.find_regions_of_interest(depth, avg_angle, midpoint_dists_wrt_center)
+    regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth, avg_angle, midpoint_dists_wrt_center)
     end_time_cpu = time.perf_counter()
     cpu_roi_time += (end_time_cpu - start_time_cpu)
 
     start_time_cpu = time.perf_counter()
-    # fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector_cpu.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=img)
-    fitted_lines, line_inlier_counts, roi_pcs, point_colors, rgb_masked = ransac_on_rois(
-        regions_of_interest,
-        roi_line_counts,
-        avg_angle,
-        wire_detector_cpu.camera_rays,       # numpy float32 array, expected as-is
-        depth,       # OpenCV Mat
-        img,           # optional OpenCV Mat or None
-        wire_detector_cpu.min_depth_clip,
-        wire_detector_cpu.max_depth_clip,
-        wire_detector_cpu.ransac_max_iters,
-        wire_detector_cpu.inlier_threshold_m,
-        wire_detector_cpu.vert_angle_maximum_rad,
-        wire_detector_cpu.horz_angle_diff_maximum_rad,
-    )
+    # fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=img)
+    fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=img)
+
     end_time_cpu = time.perf_counter()
     cpu_ransac_time += (end_time_cpu - start_time_cpu)
     cpu_total_time += (end_time_cpu - total_start_time)
@@ -106,41 +92,5 @@ print(f"Average CPU detection time: {avg_cpu_detection_time:.6f} seconds, {1 / a
 print(f"Average CPU regions of interest time: {avg_cpu_roi_time:.6f} seconds, {1 / avg_cpu_roi_time:.6f} Hz")
 print(f"Average CPU RANSAC on ROIs time: {avg_cpu_ransac_time:.6f} seconds, {1 / avg_cpu_ransac_time:.6f} Hz")
 print(f"Average CPU total time: {avg_cpu_total_time:.6f} seconds, {1 / avg_cpu_total_time:.6f} Hz")
-
-
-print("Starting GPU detection...")
-# Now for the GPU detection
-gpu_detection_time = 0
-gpu_roi_time = 0
-gpu_ransac_time = 0
-gpu_total_time = 0
-for i in range(iterations):
-    total_start_time = time.perf_counter()
-    start_time_gpu = time.perf_counter()
-    wire_lines_gpu, wire_midpoints_gpu, avg_angle_gpu, midpoint_dists_wrt_center_gpu = wire_detector_gpu.detect_wires_2d(img)
-    end_time_gpu = time.perf_counter()
-    gpu_detection_time += (end_time_gpu - start_time_gpu)
-
-    start_time_gpu = time.perf_counter()
-    regions_of_interest_gpu, roi_line_counts_gpu = wire_detector_gpu.find_regions_of_interest(depth, avg_angle_gpu, midpoint_dists_wrt_center_gpu)
-    end_time_gpu = time.perf_counter()
-    gpu_roi_time += (end_time_gpu - start_time_gpu)
-
-    start_time_gpu = time.perf_counter()
-    fitted_lines_gpu, line_inlier_counts_gpu, roi_pcs_gpu, roi_point_colors_gpu, rgb_masked_gpu = wire_detector_gpu.ransac_on_rois(regions_of_interest_gpu, roi_line_counts_gpu, avg_angle_gpu, depth, viz_img=img)
-    end_time_gpu = time.perf_counter()
-    gpu_ransac_time += (end_time_gpu - start_time_gpu)
-    gpu_total_time += (end_time_gpu - total_start_time)
-
-avg_gpu_detection_time = gpu_detection_time / iterations
-avg_gpu_roi_time = gpu_roi_time / iterations
-avg_gpu_ransac_time = gpu_ransac_time / iterations
-avg_gpu_total_time = gpu_total_time / iterations
-print(f"Average GPU detection time: {avg_gpu_detection_time:.6f} seconds, {1 / avg_gpu_detection_time:.6f} Hz")
-print(f"Average GPU regions of interest time: {avg_gpu_roi_time:.6f} seconds, {1 / avg_gpu_roi_time:.6f} Hz")
-print(f"Average GPU RANSAC on ROIs time: {avg_gpu_ransac_time:.6f} seconds, {1 / avg_gpu_ransac_time:.6f} Hz")
-print(f"Average GPU total time: {avg_gpu_total_time:.6f} seconds, {1 / avg_gpu_total_time:.6f} Hz")
-print(f"Speedup: {avg_cpu_total_time / avg_gpu_total_time:.2f}x")
-
 
 
