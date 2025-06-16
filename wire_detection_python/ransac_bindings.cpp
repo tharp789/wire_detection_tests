@@ -452,7 +452,7 @@ RansacResult ransac_on_rois(
         int line_count = roi_line_counts[i];
 
         auto [points, colors] = depth_to_pointcloud(
-            roi_depth, camera_rays, {min_depth_clip, max_depth_clip}, viz_ptr ? &roi_data : nullptr);
+            roi_depth, camera_rays, {min_depth_clip, max_depth_clip}, viz_ptr ? &roi_rgb : nullptr);
 
         std::vector<Eigen::Vector3f> point_vec;
         for (int r = 0; r < points.rows(); ++r)
