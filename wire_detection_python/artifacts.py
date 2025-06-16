@@ -335,3 +335,99 @@ def find_closest_distance_from_points_to_line_3d(points, line_ends):
     distances = np.linalg.norm(points - closest_points, axis=1)
     
     return distances
+
+# up and down gradients
+min_depth = 0.5
+depth[depth <= min_depth] = 0
+
+depth_viz = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+depth_viz = cv2.applyColorMap(depth_viz, cv2.COLORMAP_JET)
+depth_viz = cv2.resize(depth_viz, (1280, 720))
+cv2.imwrite('detect_3d_output/depth_viz.jpg', depth_viz)
+plt.figure()
+plt.imshow(depth_viz)
+
+start_time = time.perf_counter()
+depth_gradient_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=11)
+depth_gradient_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=11)
+perp_angle = wdu.perpendicular_angle_rad(avg_angle)
+depth_gradient = depth_gradient_x * np.cos(perp_angle) + depth_gradient_y * np.sin(perp_angle)
+
+distance, depth_gradient_1d = wdu.project_image_to_axis(depth_gradient, perp_angle)
+depth_gradient_1d = np.abs(depth_gradient_1d)
+depth_gradient_1d = depth_gradient_1d / np.max(depth_gradient_1d)
+
+dist_hist, bin_edges = np.histogram(distance, bins=np.arange(np.min(distance), np.max(distance), 1), weights=depth_gradient_1d)
+bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+dist_hist = dist_hist / np.max(dist_hist)
+
+threshold = wire_detector.grad_bin_avg_threshold
+mask = dist_hist > threshold
+mask_diff = np.diff(mask.astype(int))
+mask_diff = np.concatenate(([0], mask_diff))
+
+start_indices = np.where(mask_diff == 1)[0]
+end_indices = np.where(mask_diff == -1)[0]
+# if ensure that the first start index is not after the first end index
+if start_indices[0] > end_indices[0]:
+    start_indices = np.insert(start_indices, 0, 0)
+if len(start_indices) > len(end_indices):
+    end_indices = np.append(end_indices, len(mask) - 1)
+if len(end_indices) > len(start_indices):
+    start_indices = np.append(0, start_indices)
+assert len(start_indices) == len(end_indices), "Mismatch in start and end indices length"
+
+regions_of_interest = []
+roi_line_count = []
+
+for start, end in zip(start_indices, end_indices):
+    if bin_centers[start] < bin_centers[end]:
+        start = bin_centers[start]
+        end = bin_centers[end]
+        should_add_region = False
+        line_count = 0
+        for wire_dist in midpoint_dists_wrt_center: 
+            if start <= wire_dist <= end:
+                # Append the region to the list
+                line_count += 1
+                should_add_region = True
+                
+        if should_add_region:
+            regions_of_interest.append((start, end))
+            roi_line_count.append(line_count)
+
+print(f"Regions of interest: {regions_of_interest}")
+print(f"ROI line counts: {roi_line_count}")
+
+projection_start = time.perf_counter()
+roi_depths, depth_masked, roi_rgbs, rgb_masked = wire_detector.roi_to_point_clouds(regions_of_interest, avg_angle, depth, img)
+print(f"ROI to point clouds took {time.perf_counter() - projection_start:.6f} seconds")
+
+end_time = time.perf_counter()
+print(f"Time taken for depth gradient calculation: {end_time - start_time:.6f} seconds, { 1 / (end_time - start_time):.2f} Hz")
+
+depth_gradient_viz = cv2.normalize(depth_gradient, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+depth_gradient_viz = cv2.resize(depth_gradient_viz, (1280, 720))
+cv2.imwrite('detect_3d_output/depth_gradient.jpg', depth_gradient_viz)
+plt.figure()
+plt.imshow(depth_gradient_viz)
+
+plt.figure()
+plt.bar(bin_centers, dist_hist, width=1, color='blue', alpha=0.7)
+plt.vlines(midpoint_dists_wrt_center, min(dist_hist), max(dist_hist), color='red', alpha=0.7, label='wire midpoints')
+for start, end in regions_of_interest:
+    plt.axvspan(start, end, color='yellow', alpha=0.5, label='ROI')
+    plt.axvline(x=start, color='green', linestyle='--')
+    plt.axvline(x=end, color='green', linestyle='--')
+plt.axhline(y=threshold, color='green', linestyle='--', label='ROI mask')
+plt.title('Histogram of depth gradient values')
+plt.xlabel('distances from center')
+plt.ylabel('count of depth gradient values')
+plt.grid()
+plt.savefig('detect_3d_output/histogram_neg.png')
+plt.show()
+
+cv2.imwrite('detect_3d_output/rgb_masked.jpg', rgb_masked)
+plt.figure()
+plt.imshow(cv2.cvtColor(rgb_masked, cv2.COLOR_BGR2RGB))
+plt.show()

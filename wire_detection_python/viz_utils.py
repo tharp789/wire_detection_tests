@@ -63,9 +63,10 @@ def visualize_fitted_lines(fitted_lines, roi_pcs, roi_point_colors):
         geometries.append(cylinder)
 
     for points, colors in zip(roi_pcs, roi_point_colors):
+        norm_colors = np.array(colors) / 255.0  # Normalize colors to [0, 1]
         point_cloud = o3d.geometry.PointCloud()
         point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+        point_cloud.colors = o3d.utility.Vector3dVector(norm_colors)
         geometries.append(point_cloud)
 
     o3d.visualization.draw_geometries(geometries, 
