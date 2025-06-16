@@ -268,11 +268,13 @@ class WireDetector:
         Returns:
             fitted_lines (list): List of fitted lines in 3D.
         """
+        depth_image = np.ascontiguousarray(depth_image, dtype=np.float32)
+        assert depth_image.ndim == 2, "Depth image must be 2D"
         if viz_img is not None:
-            img = viz_img.copy()
-            H, W, C = img.shape
-            rgb_image = img.reshape(H, W * C)
-
+            masked_viz_img = np.ascontiguousarray(viz_img, dtype=np.uint8)
+            assert masked_viz_img.ndim == 3 and masked_viz_img.shape[2] == 3, "Viz image must be 3D with 3 channels"
+        else:
+            masked_viz_img = None
         result = rb.ransac_on_rois(rois, roi_line_counts.tolist(), 
                                         float(avg_angle), 
                                         self.camera_rays.astype(np.float32), 
@@ -280,14 +282,10 @@ class WireDetector:
                                         float(self.min_depth_clip),
                                         float(self.max_depth_clip), 
                                         int(self.ransac_max_iters), 
-                                        float(self.inlier_threshold_m), 
+                                        float(self.inlier_threshold_m),
                                         float(self.vert_angle_maximum_rad),
                                         float(self.horz_angle_diff_maximum_rad), 
-                                        viz_img=rgb_image.astype(np.uint8) if viz_img is not None else None)
-        if result.masked_viz_img is not None:
-            masked_viz_img = result.masked_viz_img.reshape(H, W, C).astype(np.uint8)
-        else:
-            masked_viz_img = None
+                                        viz_img=viz_img if viz_img is not None else None)
 
         return  result.fitted_lines, result.inlier_counts, result.roi_point_clouds, result.point_colors if result.point_colors else None, masked_viz_img if masked_viz_img is not None else None
 
@@ -318,7 +316,7 @@ class WireDetector:
             if colors is not None:
                 colors = (np.array(colors) / 255.0)[:,::-1]
                 roi_point_colors.append(colors)
-            lines, line_inlier_count = rb.ransac_line_fitting(points.astype(np.float64), float(avg_angle), int(line_count), int(self.ransac_max_iters),
+            lines, line_inlier_count = rb.ransac_line_fitting(points.astype(np.float32), float(avg_angle), int(line_count), int(self.ransac_max_iters),
                                                 float(self.inlier_threshold_m), float(self.vert_angle_maximum_rad), float(self.horz_angle_diff_maximum_rad))
 
             fitted_lines += lines
@@ -326,6 +324,15 @@ class WireDetector:
 
         return fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors if roi_point_colors else None, masked_viz_img if viz_img is not None else None
     
+    def test_image_handoff(self, depth, rgb_image):
+        
+        depth_ret, rgb_ret = rb.test_img_handoff(depth, rgb_image)
+        assert depth_ret.shape == depth.shape, "Depth image shape mismatch"
+        assert rgb_ret.shape == rgb_image.shape, "RGB image shape mismatch"
+        assert depth_ret.dtype == np.float32, "Depth image dtype should be float32"
+        assert rgb_ret.dtype == np.uint8, "RGB image dtype should be uint8"
+        return  depth_ret, rgb_ret
+
     def detect_3d_wires(self, rgb_image, depth_image, generate_viz = False):
         """
         Find wires in 3D from the RGB and depth images.

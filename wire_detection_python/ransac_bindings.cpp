@@ -2,9 +2,6 @@
 #include <pybind11/eigen.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <pybind11/complex.h>
-#include <pybind11/functional.h>
-#include <pybind11/chrono.h>
 
 #include <vector>
 #include <cmath>
@@ -20,8 +17,8 @@ using Eigen::MatrixXf;
 using Eigen::Vector3f;
 using std::vector;
 
-// build with: g++ -O3 -Wall -shared -std=c++17 -fPIC     $(python3 -m pybind11 --includes)     -I/usr/include/eigen3     $(pkg-config --cflags opencv4)     ransac_bindings.cpp     -o ransac_bindings$(python3-config --extension-suffix)     $(pkg-config --libs opencv4)
-
+// build with:
+// g++ -O3 -Wall -shared -std=c++17 -fPIC     $(python3 -m pybind11 --includes)     -I/usr/include/eigen3     $(pkg-config --cflags opencv4)     ransac_bindings.cpp     -o ransac_bindings$(python3-config --extension-suffix)     $(pkg-config --libs opencv4)
 
 // Fold angle to [0, pi]
 float fold_angle_from_0_to_pi(float angle)
@@ -48,8 +45,14 @@ Eigen::VectorXf find_closest_distance_from_points_to_line_3d(
     const Eigen::MatrixXf &line_ends // 2x3 matrix
 )
 {
-    assert(points.cols() == 3 && "Points must be 3D");
-    assert(line_ends.rows() == 2 && line_ends.cols() == 3 && "Line ends must be 2x3");
+    if (points.cols() != 3)
+    {
+        throw std::runtime_error("Points must be 3D (Nx3 matrix)");
+    }
+    if (line_ends.rows() != 2 || line_ends.cols() != 3)
+    {
+        throw std::runtime_error("Line ends must be a 2x3 matrix");
+    }
 
     const Eigen::RowVector3f p1 = line_ends.row(0).cast<float>(); // Fixed: Cast to float
     const Eigen::RowVector3f p2 = line_ends.row(1).cast<float>(); // Fixed: Cast to float
@@ -341,12 +344,26 @@ std::pair<Eigen::MatrixXf, std::optional<Eigen::MatrixXf>> depth_to_pointcloud(
     const int W = depth_image.cols;
     const int N = H * W;
 
-    CV_Assert(depth_image.type() == CV_32FC1);
-    CV_Assert(camera_rays.rows() == N && camera_rays.cols() == 3);
+    if (depth_image.type() != CV_32FC1)
+    {
+        throw std::runtime_error("depth_image must be of type CV_32FC1 (32-bit float, single channel)");
+    }
+
+    if (camera_rays.rows() != N || camera_rays.cols() != 3)
+    {
+        throw std::runtime_error("camera_rays must have shape (N, 3)");
+    }
+
     if (rgb_image)
     {
-        CV_Assert(rgb_image->type() == CV_8UC3);
-        CV_Assert(rgb_image->rows == H && rgb_image->cols == W);
+        if (rgb_image->type() != CV_8UC3)
+        {
+            throw std::runtime_error("rgb_image must be of type CV_8UC3 (8-bit 3-channel color image)");
+        }
+        if (rgb_image->rows != H || rgb_image->cols != W)
+        {
+            throw std::runtime_error("rgb_image dimensions must match expected size (H, W)");
+        }
     }
 
     Eigen::Map<const Eigen::VectorXf> z_coords(depth_image.ptr<float>(), N);
@@ -366,8 +383,8 @@ std::pair<Eigen::MatrixXf, std::optional<Eigen::MatrixXf>> depth_to_pointcloud(
 
     if (rgb_image)
     {
-        Eigen::MatrixXf colors(M, 3); // float RGB output
-        const cv::Vec3b* rgb_data = rgb_image->ptr<cv::Vec3b>(); // BGR format
+        Eigen::MatrixXf colors(M, 3);                            // float RGB output
+        const cv::Vec3b *rgb_data = rgb_image->ptr<cv::Vec3b>(); // BGR format
 
         for (int i = 0; i < M; ++i)
         {
@@ -376,7 +393,7 @@ std::pair<Eigen::MatrixXf, std::optional<Eigen::MatrixXf>> depth_to_pointcloud(
 
             points.row(i) = camera_rays.row(idx) * z;
 
-            const cv::Vec3b& bgr = rgb_data[idx];
+            const cv::Vec3b &bgr = rgb_data[idx];
             colors.row(i) << bgr[2], bgr[1], bgr[0]; // RGB, not normalized
         }
 
@@ -402,43 +419,71 @@ struct RansacResult
     std::vector<int> inlier_counts;
     std::vector<Eigen::MatrixXf> roi_point_clouds;
     std::optional<std::vector<Eigen::MatrixXf>> point_colors;
-    std::optional<Eigen::MatrixXf> masked_viz_img;
+    std::optional<py::array_t<uint8_t>> masked_viz_img;
 };
 
-// Main function
 RansacResult ransac_on_rois(
     const std::vector<std::pair<float, float>> &rois,
     const std::vector<int> &roi_line_counts,
     float avg_angle,
     const Eigen::MatrixXf &camera_rays,
-    const Eigen::MatrixXf &depth_image,
+    const py::array_t<float> &depth_img,
     float min_depth_clip,
     float max_depth_clip,
     int ransac_max_iters,
     float inlier_threshold_m,
     float vert_angle_maximum_rad,
     float horz_angle_diff_maximum_rad,
-    const std::optional<Eigen::MatrixXf> &viz_img)
+    const std::optional<py::array_t<uint8_t>> &viz_img)
 {
-    cv::Mat depth_img(depth_image.rows(), depth_image.cols(), CV_32FC1, const_cast<float *>(depth_image.data()));
-    CV_Assert(depth_img.type() == CV_32FC1);
-    CV_Assert(camera_rays.rows() == depth_img.rows * depth_img.cols && camera_rays.cols() == 3);
+    cv::Mat depth_mat(depth_img.shape(0), depth_img.shape(1), CV_32FC1);
+    std::memcpy(depth_mat.data, depth_img.data(), depth_img.size() * sizeof(float));
+
+    if (depth_mat.type() != CV_32FC1)
+    {
+        throw std::runtime_error("depth_img must be of type CV_32FC1 (float grayscale image)");
+    }
+
+    if (camera_rays.rows() != depth_mat.rows * depth_mat.cols || camera_rays.cols() != 3)
+    {
+        throw std::runtime_error("camera_rays must have shape (H*W, 3) where H and W match depth_img");
+    }
 
     const cv::Mat *viz_ptr = nullptr;
     cv::Mat viz_mat;
 
     if (viz_img.has_value())
     {
-        // Assuming viz_img is H x W x 3 stored as float interleaved channels
-        CV_Assert(viz_img->rows() == depth_img.rows && viz_img->cols() % 3 == 0);
-        viz_mat = cv::Mat(viz_img->rows(), viz_img->cols() / 3, CV_32FC3, const_cast<float *>(viz_img->data()));
-        viz_mat.convertTo(viz_mat, CV_8UC3); // Convert to 8-bit BGR
-        CV_Assert(viz_mat.rows == depth_img.rows && viz_mat.cols == depth_img.cols);
-        CV_Assert(viz_mat.type() == CV_8UC3);
+        if (viz_img->ndim() != 3 || viz_img->shape(0) != depth_mat.rows || viz_img->shape(1) != depth_mat.cols || viz_img->shape(2) != 3)
+        {
+            throw std::runtime_error("viz_img must have shape (H, W, 3) and match depth_img dimensions");
+        }
+        viz_mat = cv::Mat(viz_img->shape(0), viz_img->shape(1), CV_8UC3);
+        std::memcpy(viz_mat.data, viz_img->data(), viz_img->size() * sizeof(uint8_t));
+
+        if (viz_mat.rows != depth_mat.rows || viz_mat.cols != depth_mat.cols)
+        {
+            throw std::runtime_error("viz_img dimensions do not match depth_img");
+        }
+
+        if (viz_mat.type() != CV_8UC3)
+        {
+            throw std::runtime_error("viz_img must be of type CV_8UC3");
+        }
+
         viz_ptr = &viz_mat;
     }
 
-    ROIData roi_data = roi_to_point_clouds(rois, avg_angle, depth_img, viz_ptr);
+    std::cout << "Got depth image of shape: "
+              << depth_mat.rows << "x"
+              << depth_mat.cols << std::endl;
+    if (viz_ptr)
+    {
+        std::cout << "Got viz image of shape: "
+                  << viz_ptr->rows << "x"
+                  << viz_ptr->cols << std::endl;
+    }
+    ROIData roi_data = roi_to_point_clouds(rois, avg_angle, depth_mat, viz_ptr);
 
     std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> fitted_lines;
     std::vector<int> line_inlier_counts;
@@ -458,6 +503,7 @@ RansacResult ransac_on_rois(
 
         auto [points, colors] = depth_to_pointcloud(
             roi_depth, camera_rays, {min_depth_clip, max_depth_clip}, viz_ptr ? &roi_rgb : nullptr);
+
         roi_pcs.push_back(points);
         if (colors.has_value())
         {
@@ -465,7 +511,7 @@ RansacResult ransac_on_rois(
         }
         else
         {
-            roi_point_colors.emplace_back(); // Empty vector if no colors
+            roi_point_colors.emplace_back(); // Empty matrix
         }
 
         auto [lines, inlier_counts] = ransac_line_fitting(
@@ -475,42 +521,82 @@ RansacResult ransac_on_rois(
         fitted_lines.insert(fitted_lines.end(), lines.begin(), lines.end());
         line_inlier_counts.insert(line_inlier_counts.end(), inlier_counts.begin(), inlier_counts.end());
     }
+
     RansacResult result;
     result.fitted_lines = std::move(fitted_lines);
     result.inlier_counts = std::move(line_inlier_counts);
     result.roi_point_clouds = std::move(roi_pcs);
+
     if (!roi_point_colors.empty())
     {
         result.point_colors = std::move(roi_point_colors);
     }
     else
     {
-        result.point_colors = std::nullopt; // Fixed: Use std::nullopt for empty case
+        result.point_colors = std::nullopt;
     }
 
     if (!roi_data.masked_viz_img.empty())
     {
-        cv::Mat float_viz;
-        roi_data.masked_viz_img.convertTo(float_viz, CV_32FC3); // Ensure float32 format
-
-        if (!float_viz.isContinuous())
-        {
-            float_viz = float_viz.clone(); // Ensure contiguous memory
-        }
-
-        Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mat_map(
-            reinterpret_cast<float *>(float_viz.data),
-            float_viz.rows,
-            float_viz.cols * 3);
-
-        // Safely copy the data into the result matrix (deep copy)
-        result.masked_viz_img = Eigen::MatrixXf(mat_map);
+        cv::Mat rgb_masked;
+        cv::cvtColor(roi_data.masked_viz_img, rgb_masked, cv::COLOR_BGR2RGB);
+        py::array_t<uint8_t> masked_viz_img(
+            {rgb_masked.rows, rgb_masked.cols, 3},
+            {rgb_masked.step[0], rgb_masked.step[1], sizeof(uint8_t)},
+            rgb_masked.data);
+        result.masked_viz_img = masked_viz_img;
     }
     else
     {
         result.masked_viz_img = std::nullopt;
     }
+
     return result;
+}
+
+std::tuple<py::array_t<float>, py::array_t<uint8_t>> test_img_handoff(const py::array_t<float> &depth_img, const py::array_t<uint8_t> &viz_img)
+{
+
+    std::cout << "Received image with shape: "
+              << viz_img.shape(0) << "x"
+              << viz_img.shape(1) << "x"
+              << viz_img.shape(2) << std::endl;
+    auto rows = viz_img.shape(0);
+    auto cols = viz_img.shape(1);
+    auto type = CV_8UC3;
+
+    cv::Mat depth_mat(depth_img.shape(0), depth_img.shape(1), CV_32FC1);
+    std::memcpy(depth_mat.data, depth_img.data(), depth_img.size() * sizeof(float));
+
+    cv::Mat bgr_mat = cv::Mat(rows, cols, type);
+    std::memcpy(bgr_mat.data, viz_img.data(), viz_img.size() * sizeof(uint8_t));
+    cv::Mat rgb_mat;
+    cv::cvtColor(bgr_mat, rgb_mat, cv::COLOR_BGR2RGB);
+
+    if (rgb_mat.type() != CV_8UC3)
+    {
+        throw std::runtime_error("Expected image type CV_8UC3");
+    }
+    if (rgb_mat.rows != rows || rgb_mat.cols != cols)
+    {
+        throw std::runtime_error("Image dimensions do not match expected size");
+    }
+    py::array_t<uint8_t> rgb_result(
+        {rgb_mat.rows, rgb_mat.cols, 3},                     // Shape: HxWx3
+        {rgb_mat.step[0], rgb_mat.step[1], sizeof(uint8_t)}, // Strides
+        rgb_mat.data);                                       // Data pointer
+    // Ensure the data is contiguous
+    if (!rgb_result.flags() & py::array::c_style)
+    {
+        throw std::runtime_error("Result array is not C-style contiguous");
+    }
+
+    py::array_t<float> depth_result(
+        {depth_mat.rows, depth_mat.cols},                     // Shape: HxW
+        {depth_mat.step[0], sizeof(float)},                   // Strides
+        depth_mat.ptr<float>());                              // Data pointer
+
+    return  {depth_result, rgb_result};
 }
 
 // Pybind11 bindings
@@ -547,4 +633,9 @@ PYBIND11_MODULE(ransac_bindings, m)
           py::arg("vert_angle_maximum_rad"),
           py::arg("horz_angle_diff_maximum_rad"),
           py::arg("viz_img") = std::nullopt);
+
+    m.def("test_img_handoff", &test_img_handoff,
+          py::arg("depth_img"),
+          py::arg("rgb_img"),
+          "Test function to ensure RGB image handoff works correctly");
 }
