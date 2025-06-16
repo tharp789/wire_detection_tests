@@ -13,7 +13,7 @@ min_depth_clip_m: 0.5
 max_depth_clip_m: 12.0
 
 # RANSAC settings
-ransac_max_iters: 300
+ransac_max_iters: 500
 inlier_threshold_m: 0.1016 # 4 inches
 vert_angle_maximum_rad: 0.174533 # 10 degrees
 horz_angle_diff_maximum_rad: 0.0698132 # 4 degrees

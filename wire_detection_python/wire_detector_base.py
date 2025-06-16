@@ -287,7 +287,12 @@ class WireDetector:
                                         float(self.horz_angle_diff_maximum_rad), 
                                         viz_img=viz_img if viz_img is not None else None)
 
-        return  result.fitted_lines, result.inlier_counts, result.roi_point_clouds, result.point_colors if result.point_colors else None, masked_viz_img if masked_viz_img is not None else None
+        pc_colors = result.point_colors
+        if pc_colors is not None:
+            for i in range(len(pc_colors)):
+                if pc_colors[i] is not None:
+                    pc_colors[i] = pc_colors[i].astype(np.uint8)
+        return  result.fitted_lines, result.inlier_counts, result.roi_point_clouds, pc_colors if viz_img is not None else None, result.masked_viz_img if viz_img is not None else None
 
     def ransac_on_rois(self, rois, roi_line_counts, avg_angle, depth_image, viz_img=None):
         """

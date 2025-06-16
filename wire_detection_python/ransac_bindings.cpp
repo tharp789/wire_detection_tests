@@ -473,16 +473,6 @@ RansacResult ransac_on_rois(
 
         viz_ptr = &viz_mat;
     }
-
-    std::cout << "Got depth image of shape: "
-              << depth_mat.rows << "x"
-              << depth_mat.cols << std::endl;
-    if (viz_ptr)
-    {
-        std::cout << "Got viz image of shape: "
-                  << viz_ptr->rows << "x"
-                  << viz_ptr->cols << std::endl;
-    }
     ROIData roi_data = roi_to_point_clouds(rois, avg_angle, depth_mat, viz_ptr);
 
     std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> fitted_lines;
@@ -556,11 +546,6 @@ RansacResult ransac_on_rois(
 
 std::tuple<py::array_t<float>, py::array_t<uint8_t>> test_img_handoff(const py::array_t<float> &depth_img, const py::array_t<uint8_t> &viz_img)
 {
-
-    std::cout << "Received image with shape: "
-              << viz_img.shape(0) << "x"
-              << viz_img.shape(1) << "x"
-              << viz_img.shape(2) << std::endl;
     auto rows = viz_img.shape(0);
     auto cols = viz_img.shape(1);
     auto type = CV_8UC3;

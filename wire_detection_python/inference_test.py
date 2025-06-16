@@ -59,10 +59,10 @@ camera_intrinsics[1, 2] *= input_image_size[1] / original_image_size[1]
 iterations = 100
 wire_detector = WireDetectorCPU(detection_config, camera_intrinsics)
 
-depth_ret, rgb_ret = wire_detector.test_image_handoff(depth, img)
-plt.figure(figsize=(10, 10))
-plt.imshow(rgb_ret)
-plt.show()
+# depth_ret, rgb_ret = wire_detector.test_image_handoff(depth, img)
+# plt.figure(figsize=(10, 10))
+# plt.imshow(rgb_ret)
+# plt.show()
 
 print("Starting CPU detection...")
 cpu_detection_time = 0
@@ -83,8 +83,8 @@ for i in range(iterations):
     cpu_roi_time += (end_time_cpu - start_time_cpu)
 
     start_time_cpu = time.perf_counter()
-    fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
-    # fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=img)
+    # fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
+    fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=img)
 
     end_time_cpu = time.perf_counter()
     cpu_ransac_time += (end_time_cpu - start_time_cpu)
