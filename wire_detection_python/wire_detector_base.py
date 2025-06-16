@@ -285,7 +285,7 @@ class WireDetector:
                                         float(self.horz_angle_diff_maximum_rad), 
                                         viz_img=rgb_image.astype(np.uint8) if viz_img is not None else None)
         if result.masked_viz_img is not None:
-            masked_viz_img = result.masked_viz_img.reshape(H, W, C)
+            masked_viz_img = result.masked_viz_img.reshape(H, W, C).astype(np.uint8)
         else:
             masked_viz_img = None
 

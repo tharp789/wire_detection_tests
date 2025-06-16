@@ -305,13 +305,13 @@ ROIData roi_to_point_clouds(
         cv::fillConvexPoly(single_roi_mask, box_int_pts, 255);
 
         cv::Mat roi_depth;
-        depth_image.copyTo(roi_depth, single_roi_mask);
+        cv::bitwise_and(depth_image, depth_image, roi_depth, single_roi_mask);
         roi_depths.push_back(std::move(roi_depth));
 
         if (viz_img)
         {
             cv::Mat roi_rgb;
-            viz_img->copyTo(roi_rgb, single_roi_mask);
+            cv::bitwise_and(*viz_img, *viz_img, roi_rgb, single_roi_mask);
             roi_rgbs.push_back(std::move(roi_rgb));
             cv::fillConvexPoly(viz_mask, box_int_pts, 255);
         }
