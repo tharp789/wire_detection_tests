@@ -360,31 +360,36 @@ std::pair<Eigen::MatrixXf, std::optional<Eigen::MatrixXf>> depth_to_pointcloud(
             valid_indices.push_back(i);
     }
 
-    const int M = valid_indices.size();
+    const int M = static_cast<int>(valid_indices.size());
     Eigen::MatrixXf points(M, 3);
-    std::optional<Eigen::MatrixXf> rgb; // Fixed: Wrapped in optional
+    std::optional<Eigen::MatrixXf> rgb_points = std::nullopt;
 
     if (rgb_image)
     {
-        rgb = Eigen::MatrixXf(M, 3); // Fixed: Initialize properly
-        const cv::Vec3b *rgb_ptr = rgb_image->ptr<cv::Vec3b>();
+        Eigen::MatrixXf colors(M, 3); // float RGB output
+        const cv::Vec3b* rgb_data = rgb_image->ptr<cv::Vec3b>(); // BGR format
+
         for (int i = 0; i < M; ++i)
         {
             int idx = valid_indices[i];
-            points.row(i) = camera_rays.row(idx) * z_coords(idx);
-            const cv::Vec3b &color = rgb_ptr[idx];
-            (*rgb)(i, 0) = static_cast<float>(color[2]); // R
-            (*rgb)(i, 1) = static_cast<float>(color[1]); // G
-            (*rgb)(i, 2) = static_cast<float>(color[0]); // B
+            float z = z_coords(idx);
+
+            points.row(i) = camera_rays.row(idx) * z;
+
+            const cv::Vec3b& bgr = rgb_data[idx];
+            colors.row(i) << bgr[2], bgr[1], bgr[0]; // RGB, not normalized
         }
-        return {points, rgb};
+
+        rgb_points = colors;
+        return {points, rgb_points};
     }
     else
     {
         for (int i = 0; i < M; ++i)
         {
             int idx = valid_indices[i];
-            points.row(i) = camera_rays.row(idx) * z_coords(idx);
+            float z = z_coords(idx);
+            points.row(i) = camera_rays.row(idx) * z;
         }
         return {points, std::nullopt};
     }
@@ -395,8 +400,8 @@ struct RansacResult
 {
     std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> fitted_lines;
     std::vector<int> inlier_counts;
-    std::vector<std::vector<Eigen::Vector3f>> roi_point_clouds;
-    std::optional<std::vector<std::vector<Eigen::Vector3f>>> point_colors;
+    std::vector<Eigen::MatrixXf> roi_point_clouds;
+    std::optional<std::vector<Eigen::MatrixXf>> point_colors;
     std::optional<Eigen::MatrixXf> masked_viz_img;
 };
 
@@ -437,8 +442,8 @@ RansacResult ransac_on_rois(
 
     std::vector<std::pair<Eigen::Vector3f, Eigen::Vector3f>> fitted_lines;
     std::vector<int> line_inlier_counts;
-    std::vector<std::vector<Eigen::Vector3f>> roi_pcs;
-    std::vector<std::vector<Eigen::Vector3f>> roi_point_colors;
+    std::vector<Eigen::MatrixXf> roi_pcs;
+    std::vector<Eigen::MatrixXf> roi_point_colors;
 
     if (roi_data.roi_rgbs.empty())
     {
@@ -453,25 +458,14 @@ RansacResult ransac_on_rois(
 
         auto [points, colors] = depth_to_pointcloud(
             roi_depth, camera_rays, {min_depth_clip, max_depth_clip}, viz_ptr ? &roi_rgb : nullptr);
-
-        std::vector<Eigen::Vector3f> point_vec;
-        for (int r = 0; r < points.rows(); ++r)
+        roi_pcs.push_back(points);
+        if (colors.has_value())
         {
-            point_vec.emplace_back(points(r, 0), points(r, 1), points(r, 2));
+            roi_point_colors.push_back(colors.value());
         }
-        roi_pcs.push_back(std::move(point_vec));
-
-        if (colors.has_value() && colors->rows() > 0 && colors->cols() == 3)
-        { // Fixed: Check optional
-            std::vector<Eigen::Vector3f> color_vec;
-            for (int r = 0; r < colors->rows(); ++r)
-            {
-                Eigen::Vector3f c;
-                c << (*colors)(r, 2), (*colors)(r, 1), (*colors)(r, 0); // BGR -> RGB
-                c /= 255.0;
-                color_vec.push_back(c);
-            }
-            roi_point_colors.push_back(std::move(color_vec));
+        else
+        {
+            roi_point_colors.emplace_back(); // Empty vector if no colors
         }
 
         auto [lines, inlier_counts] = ransac_line_fitting(
