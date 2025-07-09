@@ -48,6 +48,8 @@ class WireDetector:
     # standard functions not depending on gpu or cpu
     def get_line_candidates(self, rgb_image):
         cartesian_lines = self.get_hough_lines(rgb_image)
+        if cartesian_lines is None or len(cartesian_lines) == 0:
+            return None, None, None
 
         line_angles = np.arctan2(
             cartesian_lines[:, 3] - cartesian_lines[:, 1],
@@ -194,7 +196,8 @@ class WireDetector:
 
         # limit the count per region to the max number of wires per ROI
         roi_line_count = np.array(roi_line_count)
-        roi_line_count = np.clip(roi_line_count, 0, self.max_wire_per_roi)
+        roi_line_count = np.maximum(roi_line_count // 2, 1)
+        roi_line_count = np.clip(roi_line_count, 1, self.max_wire_per_roi)
         return regions_of_interest, roi_line_count
 
     def roi_to_point_clouds(self, rois, avg_angle, depth_image, viz_img=None):

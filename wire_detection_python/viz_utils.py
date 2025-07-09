@@ -105,6 +105,36 @@ def capture_fitted_lines_in_image(renderer, material, img_name, fitted_lines, ro
     o3d.io.write_image(img_name, img_o3d, 9)
     renderer.scene.clear_geometry()
 
+def depth_pc_in_image(renderer, material, img_name, depth_image, rgb_image, intrinsics):
+
+    o3d_depth = o3d.geometry.Image(depth_image * 1000)  # Scale depth for visualization
+    o3d_rgb = o3d.geometry.Image(rgb_image)
+
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        color=o3d_rgb,
+        depth=o3d_depth,
+        convert_rgb_to_intensity=False,
+        depth_scale=1000.0,
+        depth_trunc=3.0  # Truncate far-away points
+    )
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(
+        width=rgb_image.shape[1],
+        height=rgb_image.shape[0],
+        fx=intrinsics[0, 0],
+        fy=intrinsics[1, 1],
+        cx=intrinsics[0, 2],
+        cy=intrinsics[1, 2]
+    )
+    pc = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsics)
+
+    renderer.scene.clear_geometry()
+    renderer.scene.add_geometry("pc", pc, material)
+
+    # Render to image
+    img_o3d = renderer.render_to_image()
+    o3d.io.write_image(img_name, img_o3d, 9)
+    renderer.scene.clear_geometry()
+    
 def visualize_colored_point_cloud(depth_image, rgb_image, camera_intrinsics):
     min_depth = 0.5
     depth_image[depth_image <= min_depth] = 0
@@ -173,8 +203,10 @@ def make_video(image_files, output_path, fps=10):
     height, width, layers = frame.shape
     video_writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
     
-    for img_path in image_files:
+    for i, img_path in enumerate(image_files):
         frame = cv2.imread(img_path)
+
         if frame is not None:
+            print(f"Writing frame {i+1}/{len(image_files)}: {img_path}")
             video_writer.write(frame)
     video_writer.release()
