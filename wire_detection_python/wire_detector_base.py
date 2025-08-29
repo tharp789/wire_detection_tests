@@ -47,7 +47,7 @@ class WireDetector:
 
     # standard functions not depending on gpu or cpu
     def get_line_candidates(self, rgb_image):
-        cartesian_lines = self.get_hough_lines(rgb_image)
+        cartesian_lines, seg_mask = self.get_hough_lines(rgb_image)
         if cartesian_lines is None or len(cartesian_lines) == 0:
             return None, None, None
 

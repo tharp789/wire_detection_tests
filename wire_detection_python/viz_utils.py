@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import open3d as o3d
+import os
 from open3d.visualization.rendering import OffscreenRenderer, MaterialRecord
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
@@ -77,8 +78,9 @@ def create_renderer(width=1920, height=1080):
     renderer = OffscreenRenderer(width, height)
     renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])  # White background
     renderer.scene.scene.enable_sun_light(True)
-
-    cam_params = o3d.io.read_pinhole_camera_parameters("./viz_point.json")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    viz_point_path = os.path.join(script_dir, "viz_point.json")
+    cam_params = o3d.io.read_pinhole_camera_parameters(viz_point_path)
     renderer.setup_camera(cam_params.intrinsic, cam_params.extrinsic)
 
     material = MaterialRecord()

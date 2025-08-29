@@ -14,10 +14,10 @@ class WireDetectorCPU(WireDetector):
         seg_mask = cv2.Canny(gray, self.low_canny_threshold, self.high_canny_threshold, apertureSize=3)
         cartesian_lines = cv2.HoughLinesP(seg_mask, 1, np.pi/180, self.hough_vote_threshold, minLineLength=self.min_line_threshold, maxLineGap=10)
         if cartesian_lines is None:
-            return None
+            return None, None
         
         cartesian_lines = np.squeeze(cartesian_lines, axis=1)
-        return cartesian_lines
+        return cartesian_lines, seg_mask
     
     def get_xy_depth_gradients(self, depth_image):
         """
