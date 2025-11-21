@@ -1,0 +1,12 @@
+============================================================
+METRICS TABLE (LaTeX format):
+============================================================
+Mean Vertical Distance (m) & 2.33603 \\
+Std Dev Vertical Distance (m) & 0.05335 \\
+Std Dev X Error (m) & 0.96345 \\
+Std Dev Y Error (m) & 0.95231 \\
+Std Dev Horizontal Error (m) & 0.18438 \\
+Ground Truth Vertical Error (m) & 0.11373 \\
+Yaw Deviation (deg) & 0.33354 \\
+Pitch Deviation (deg) & 87.74514 \\
+============================================================

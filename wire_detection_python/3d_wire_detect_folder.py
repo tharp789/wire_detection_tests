@@ -10,7 +10,7 @@ import open3d as o3d
 from wire_detector_platforms import WireDetectorCPU
 import viz_utils as vu
 
-DO_RENDERING = True
+DO_RENDERING = False
 OVERWRITE = False
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # directory of the script
@@ -22,7 +22,7 @@ with open(config_path, 'r') as file:
 # Create a WireDetector instance
 input_image_size = [480, 270]
 
-folder = "/media/tyler/Storage/field_tests/250815_vtolwire_2/" 
+folder = "/media/tyler/hummingbird/250828_afca/wire_folders/wire_data_20250828_104119/" 
 
 rgb_folder = folder + 'rgb_images/'
 depth_folder = folder + 'depth_images/'
@@ -54,60 +54,61 @@ renderer, material = vu.create_renderer()
 if OVERWRITE == False:
     current_2d_results = os.listdir(ransac_results_2d)
 
-if DO_RENDERING:
-    sync_ransac_time = 0.0
-    async_ransac_time = 0.0
-    roi_time = 0.0
-    detect_wire_time = 0.0
-    for file in rgb_file_list:
-        if OVERWRITE == False and f"{int(file.split('.')[0])}_2d.png" in current_2d_results:
-            continue
-        start_time = time.perf_counter()
-        rgb_timestamp = int(file.split('.')[0])
-        closest_depth_timestamp = None
-        for depth_file in depth_file_list:
-            if closest_depth_timestamp is None or abs(int(depth_file.split('.')[0]) - rgb_timestamp) < abs(int(closest_depth_timestamp.split('.')[0]) - rgb_timestamp):
-                closest_depth_timestamp = depth_file
-                closest_depth_file = os.path.join(depth_folder, str(closest_depth_timestamp))
-                
-        rgb_img = cv2.imread(os.path.join(rgb_folder, file))
-        depth_img = np.load(closest_depth_file)
-        rgb_img = cv2.resize(rgb_img, (input_image_size[0], input_image_size[1]))
-        depth_img = cv2.resize(depth_img, (input_image_size[0], input_image_size[1]))
-        
-        min_depth = 0.5
-        depth_img[depth_img <= min_depth] = 0
+sync_ransac_time = 0.0
+async_ransac_time = 0.0
+roi_time = 0.0
+detect_wire_time = 0.0
+for file in rgb_file_list:
+    if OVERWRITE == False and f"{int(file.split('.')[0])}_2d.png" in current_2d_results:
+        continue
+    start_time = time.perf_counter()
+    rgb_timestamp = int(file.split('.')[0])
+    closest_depth_timestamp = None
+    for depth_file in depth_file_list:
+        if closest_depth_timestamp is None or abs(int(depth_file.split('.')[0]) - rgb_timestamp) < abs(int(closest_depth_timestamp.split('.')[0]) - rgb_timestamp):
+            closest_depth_timestamp = depth_file
+            closest_depth_file = os.path.join(depth_folder, str(closest_depth_timestamp))
+            
+    rgb_img = cv2.imread(os.path.join(rgb_folder, file))
+    depth_img = np.load(closest_depth_file)
+    rgb_img = cv2.resize(rgb_img, (input_image_size[0], input_image_size[1]))
+    depth_img = cv2.resize(depth_img, (input_image_size[0], input_image_size[1]))
+    
+    min_depth = 0.5
+    depth_img[depth_img <= min_depth] = 0
 
-        start_time = time.perf_counter()
-        start_detect_wire = time.perf_counter()
-        wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector.detect_wires_2d(rgb_img)
-        detect_wire_time += time.perf_counter() - start_detect_wire
+    start_time = time.perf_counter()
+    start_detect_wire = time.perf_counter()
+    wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector.detect_wires_2d(rgb_img)
+    detect_wire_time += time.perf_counter() - start_detect_wire
 
-        fitted_lines = None
-        if wire_lines is not None and len(wire_lines) > 0:
-            start_roi = time.perf_counter()
-            regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth_img, avg_angle, midpoint_dists_wrt_center)
-            roi_time += time.perf_counter() - start_roi
+    fitted_lines = None
+    if wire_lines is not None and len(wire_lines) > 0:
+        start_roi = time.perf_counter()
+        regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth_img, avg_angle, midpoint_dists_wrt_center)
+        roi_time += time.perf_counter() - start_roi
 
-            start_ransac_sync = time.perf_counter()
-            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_img, viz_img=rgb_img)
-            sync_ransac_time += time.perf_counter() - start_ransac_sync
+        start_ransac_sync = time.perf_counter()
+        fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth_img, viz_img=rgb_img)
+        sync_ransac_time += time.perf_counter() - start_ransac_sync
 
-            end_time = time.perf_counter()
-            elapsed_time = end_time - start_time
-            avg_frequency += 1.0 / elapsed_time
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        avg_frequency += 1.0 / elapsed_time
 
-            rgb_masked = vu.draw_3d_line_on_image(rgb_masked, fitted_lines, camera_intrinsics, color=(0, 255, 0), thickness=3)
+        rgb_masked = vu.draw_3d_lines_on_image(rgb_masked, fitted_lines, camera_intrinsics, color=(0, 255, 0), thickness=3)
 
-        rgb_img_path = os.path.join(ransac_results_2d, str(rgb_timestamp) + '_2d.png')
-        pc_img_path = os.path.join(ransac_results_3d, str(rgb_timestamp) + '_3d.png')
-        if fitted_lines is None or len(fitted_lines) == 0:
-            large_rgb_img = cv2.resize(rgb_img, (1920, 1080))
-            cv2.imwrite(rgb_img_path, large_rgb_img)
+    rgb_img_path = os.path.join(ransac_results_2d, str(rgb_timestamp) + '_2d.png')
+    pc_img_path = os.path.join(ransac_results_3d, str(rgb_timestamp) + '_3d.png')
+    if fitted_lines is None or len(fitted_lines) == 0:
+        large_rgb_img = cv2.resize(rgb_img, (1920, 1080))
+        cv2.imwrite(rgb_img_path, large_rgb_img)
+        if DO_RENDERING:
             vu.depth_pc_in_image(renderer, material, pc_img_path, depth_img, rgb_img, camera_intrinsics)
-        else:
+    else:
+        cv2.imwrite(rgb_img_path, rgb_masked)
+        if DO_RENDERING:
             vu.capture_fitted_lines_in_image(renderer, material, pc_img_path, fitted_lines, roi_pcs, roi_point_colors)
-            cv2.imwrite(rgb_img_path, rgb_masked)
 
     avg_frequency /= len(rgb_file_list)
     avg_sync_ransac_time = sync_ransac_time / len(rgb_file_list)
