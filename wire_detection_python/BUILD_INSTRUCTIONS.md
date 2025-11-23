@@ -120,10 +120,34 @@ python3 -c "import ransac_bindings; print('Success!')"
 - Install Eigen3: `sudo apt-get install libeigen3-dev`
 - If installed in a non-standard location, adjust the `-I` include path
 
-### Error: "opencv4 not found"
+### Error: "opencv4 not found" or "OpenCV is not installed or pkg-config cannot find it"
 - Install OpenCV: `sudo apt-get install libopencv-dev`
 - If pkg-config can't find it, you may need to set `PKG_CONFIG_PATH`
 - Try using `opencv` instead of `opencv4` in the pkg-config commands
+
+#### Jetson Device Specific Issues
+On Jetson devices (NVIDIA Jetson Nano, Xavier, etc.), OpenCV is often installed via JetPack in non-standard locations. The build script now automatically tries to detect OpenCV in common locations, but if it still fails:
+
+1. **Find where OpenCV is installed:**
+   ```bash
+   find /usr -name "opencv2" 2>/dev/null
+   find /usr/local -name "opencv2" 2>/dev/null
+   ```
+
+2. **Set PKG_CONFIG_PATH:**
+   ```bash
+   export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+   # Then run the build script again
+   ```
+
+3. **Or use environment variables (recommended for Jetson):**
+   ```bash
+   export OPENCV_INCLUDE_DIR=/usr/local/include/opencv4  # or /usr/local/include
+   export OPENCV_LIB_DIR=/usr/local/lib
+   # Then run the build script
+   ```
+
+The build script will automatically use these environment variables if they are set.
 
 ### Error: "undefined reference" or linking errors
 - Make sure all OpenCV libraries are properly linked
