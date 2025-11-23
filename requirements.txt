@@ -6,7 +6,10 @@ pyyaml>=5.4.0
 scipy>=1.7.0
 open3d>=0.15.0
 psutil>=5.8.0
+pybind11>=2.10.0
 
 # Note: ransac_bindings is a compiled C++ extension module
 # It needs to be built from source using the ransac_bindings.cpp file
+# Run: bash wire_detection_python/build_ransac_bindings.sh
+# Or manually compile with the command shown in ransac_bindings.cpp (line 21)
 
