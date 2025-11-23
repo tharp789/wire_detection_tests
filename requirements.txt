@@ -1,0 +1,12 @@
+# Core dependencies for wire detection
+numpy>=1.21.0,<2.0.0
+opencv-python>=4.5.0
+matplotlib>=3.5.0
+pyyaml>=5.4.0
+scipy>=1.7.0
+open3d>=0.15.0
+psutil>=5.8.0
+
+# Note: ransac_bindings is a compiled C++ extension module
+# It needs to be built from source using the ransac_bindings.cpp file
+
