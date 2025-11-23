@@ -11,7 +11,7 @@ from wire_detector_platforms import WireDetectorCPU
 import viz_utils as vu
 
 DO_RENDERING = False
-OVERWRITE = False
+OVERWRITE = True
 
 script_dir = os.path.dirname(os.path.abspath(__file__))  # directory of the script
 config_path = os.path.join(script_dir, "wire_detect_config.yaml")
@@ -22,7 +22,7 @@ with open(config_path, 'r') as file:
 # Create a WireDetector instance
 input_image_size = [480, 270]
 
-folder = "/media/tyler/hummingbird/250828_afca/wire_folders/wire_data_20250828_104119/" 
+folder = "/media/tyler/hummingbird/wire_tracking_05-07_40fov/" 
 
 rgb_folder = folder + 'rgb_images/'
 depth_folder = folder + 'depth_images/'
@@ -49,7 +49,8 @@ if os.path.exists(ransac_results_3d) == False:
     os.makedirs(ransac_results_3d)
 
 avg_frequency = 0.0
-renderer, material = vu.create_renderer()
+output_size = (1280, 720)  # (width, height)
+renderer, material = vu.create_renderer(width=output_size[0], height=output_size[1])
 
 if OVERWRITE == False:
     current_2d_results = os.listdir(ransac_results_2d)
@@ -58,8 +59,11 @@ sync_ransac_time = 0.0
 async_ransac_time = 0.0
 roi_time = 0.0
 detect_wire_time = 0.0
-for file in rgb_file_list:
+total_files = len(rgb_file_list)
+print(f"Starting 3D wire detection on {total_files} images...")
+for idx, file in enumerate(rgb_file_list, 1):
     if OVERWRITE == False and f"{int(file.split('.')[0])}_2d.png" in current_2d_results:
+        print(f"[{idx}/{total_files}] Skipping {file} (already processed)")
         continue
     start_time = time.perf_counter()
     rgb_timestamp = int(file.split('.')[0])
@@ -68,7 +72,7 @@ for file in rgb_file_list:
         if closest_depth_timestamp is None or abs(int(depth_file.split('.')[0]) - rgb_timestamp) < abs(int(closest_depth_timestamp.split('.')[0]) - rgb_timestamp):
             closest_depth_timestamp = depth_file
             closest_depth_file = os.path.join(depth_folder, str(closest_depth_timestamp))
-            
+    
     rgb_img = cv2.imread(os.path.join(rgb_folder, file))
     depth_img = np.load(closest_depth_file)
     rgb_img = cv2.resize(rgb_img, (input_image_size[0], input_image_size[1]))
@@ -101,35 +105,48 @@ for file in rgb_file_list:
     rgb_img_path = os.path.join(ransac_results_2d, str(rgb_timestamp) + '_2d.png')
     pc_img_path = os.path.join(ransac_results_3d, str(rgb_timestamp) + '_3d.png')
     if fitted_lines is None or len(fitted_lines) == 0:
-        large_rgb_img = cv2.resize(rgb_img, (1920, 1080))
+        large_rgb_img = cv2.resize(rgb_img, output_size)
         cv2.imwrite(rgb_img_path, large_rgb_img)
         if DO_RENDERING:
             vu.depth_pc_in_image(renderer, material, pc_img_path, depth_img, rgb_img, camera_intrinsics)
     else:
-        cv2.imwrite(rgb_img_path, rgb_masked)
+        rgb_masked_resized = cv2.resize(rgb_masked, output_size)
+        cv2.imwrite(rgb_img_path, rgb_masked_resized)
         if DO_RENDERING:
             vu.capture_fitted_lines_in_image(renderer, material, pc_img_path, fitted_lines, roi_pcs, roi_point_colors)
 
-    avg_frequency /= len(rgb_file_list)
-    avg_sync_ransac_time = sync_ransac_time / len(rgb_file_list)
-    avg_roi_time = roi_time / len(rgb_file_list)
-    avg_detect_wire_time = detect_wire_time / len(rgb_file_list)
-    print(f"Detect 3D Average frequency: {avg_frequency:.4f}, Average Period: {1/avg_frequency:.4f} seconds")
-    print(f"Average 2D Detect Wire frequency: {1/avg_detect_wire_time:.4f}, Average Period: {avg_detect_wire_time:.4f} seconds")
-    print(f"Average ROI frequency: {1/avg_roi_time:.4f}, Average Period: {avg_roi_time:.4f} seconds")
-    print(f"Average RANSAC frequency: {1/avg_sync_ransac_time:.4f}, Average Period: {avg_sync_ransac_time:.4f} seconds")
+    print(f"[{idx}/{total_files}] saved with {len(fitted_lines) if fitted_lines is not None else 0} fitted lines")
+    
+    elapsed_time = time.perf_counter() - start_time
+
+print(f"\n{'='*60}")
+print(f"Processing complete! Processed {len(rgb_file_list)} images")
+print(f"{'='*60}\n")
+
+avg_frequency /= len(rgb_file_list)
+avg_sync_ransac_time = sync_ransac_time / len(rgb_file_list)
+avg_roi_time = roi_time / len(rgb_file_list)
+avg_detect_wire_time = detect_wire_time / len(rgb_file_list)
+print(f"Detect 3D Average frequency: {avg_frequency:.4f}, Average Period: {1/avg_frequency:.4f} seconds")
+print(f"Average 2D Detect Wire frequency: {1/avg_detect_wire_time:.4f}, Average Period: {avg_detect_wire_time:.4f} seconds")
+print(f"Average ROI frequency: {1/avg_roi_time:.4f}, Average Period: {avg_roi_time:.4f} seconds")
+print(f"Average RANSAC frequency: {1/avg_sync_ransac_time:.4f}, Average Period: {avg_sync_ransac_time:.4f} seconds")
 
 # copy the ransac results into a seperate 2d and 3d folder
-video_2d_name = folder + 'ransac_results_2d.mp4'
-video_3d_name = folder + 'ransac_results_3d.mp4'
+# video_2d_name = folder + 'ransac_results_2d.mp4'
+# video_3d_name = folder + 'ransac_results_3d.mp4'
 
-frames_2d = sorted(
-    [os.path.join(ransac_results_2d, f) for f in os.listdir(ransac_results_2d) if f.endswith(".png")]
-)
+# frames_2d = sorted(
+#     [os.path.join(ransac_results_2d, f) for f in os.listdir(ransac_results_2d) if f.endswith(".png")]
+# )
 
-frames_3d = sorted(
-    [os.path.join(ransac_results_3d, f) for f in os.listdir(ransac_results_3d) if f.endswith(".png")]
-)
+# frames_3d = sorted(
+#     [os.path.join(ransac_results_3d, f) for f in os.listdir(ransac_results_3d) if f.endswith(".png")]
+# )
 
-vu.make_video(frames_2d, video_2d_name, fps=30)
-vu.make_video(frames_3d, video_3d_name, fps=30)
+# print(f"\nCreating videos from {len(frames_2d)} 2D frames and {len(frames_3d)} 3D frames...")
+# print(f"  -> Creating 2D video: {video_2d_name}")
+# vu.make_video(frames_2d, video_2d_name, fps=30)
+# print(f"  -> Creating 3D video: {video_3d_name}")
+# vu.make_video(frames_3d, video_3d_name, fps=30)
+# print(f"\nAll done!")

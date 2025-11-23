@@ -13,27 +13,8 @@ import viz_utils as vu
 with open('wire_detection_python/wire_detect_config.yaml', 'r') as file:
     detection_config = yaml.safe_load(file)
 
-# folder = '/media/tyler/Storage/Research/Datasets/wire_tracking_05-07_40fov/'
 folder = '/media/tyler/hummingbird/wire_tracking_05-07_40fov/'
-# folder = '/home/tyler/Documents/wire_tracking_05-07_40fov/'
-# target_timestamp = 1746650648952882464 # straight wire not working
-# target_timestamp = 1746650644465219840 # straight wire/
-# target_timestamp = 1746650656862302432 # angled wire
 target_timestamp = 1746650647208735712
-
-# folder = '/media/tyler/Storage/field_tests/acfa_3-21/'
-# target_timestamp = 1742581588251564064
-
-# folder = '/media/tyler/Storage/field_tests/mocap_handheld/'
-# target_timestamp = 1752772605793735625
-
-# folder = '/media/tyler/Storage/field_tests/mill19_070225_handheld_wire/'
-# target_timestamp = 1751490103152442624
-
-# folder = '/media/tyler/Storage/field_tests/hawkins_2-19/wire_tracking_02-19_1/'
-# target_timestamp = 1739975958352738816 # seperated wires
-# target_timestamp = 1739975963786320032 # wires in a bundle
-# target_timestamp = 1739975992503588928  # wires clean
 
 rgb_folder = folder + 'rgb_images/'
 depth_folder = folder + 'depth_images/'

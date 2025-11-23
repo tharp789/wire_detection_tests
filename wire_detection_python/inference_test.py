@@ -1,19 +1,20 @@
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 import time
 import os
 import yaml
-import matplotlib.pyplot as plt
+import importlib
 
 from wire_detector_platforms import WireDetectorCPU
+# from ransac_bindings import ransac_on_rois
+import viz_utils as vu
 
 with open('wire_detection_python/wire_detect_config.yaml', 'r') as file:
     detection_config = yaml.safe_load(file)
 
-# folder = '/root/test_data/'
-folder = '/media/tyler/Storage/Research/Datasets/wire_tracking_05-07_40fov/'
-
-target_timestamp = 1746650644465219840 # straight wire
+folder = '/media/airlab/hummingbird/250815_vtolwire_2/'
+target_timestamp = 1755288207710306880
 
 rgb_folder = folder + 'rgb_images/'
 depth_folder = folder + 'depth_images/'
@@ -42,7 +43,7 @@ print(f"Time difference between closest RGB and depth images: {abs(closest_rgb_t
     
 input_image_size = [480, 270] 
 img = cv2.imread(rgb_folder + rgb_image_path)
-depth = np.load(depth_folder + depth_image_path).astype(np.float32)
+depth = np.load(depth_folder + depth_image_path)
 img = cv2.resize(img, (input_image_size[0], input_image_size[1]))
 depth = cv2.resize(depth, (input_image_size[0], input_image_size[1]))
 assert img is not None, "Image not found"
@@ -56,47 +57,71 @@ camera_intrinsics[1, 1] *= input_image_size[1] / original_image_size[1]
 camera_intrinsics[0, 2] *= input_image_size[0] / original_image_size[0]
 camera_intrinsics[1, 2] *= input_image_size[1] / original_image_size[1]
 
-iterations = 100
 wire_detector = WireDetectorCPU(detection_config, camera_intrinsics)
 
-# depth_ret, rgb_ret = wire_detector.test_image_handoff(depth, img)
-# plt.figure(figsize=(10, 10))
-# plt.imshow(rgb_ret)
-# plt.show()
+# Number of iterations for benchmarking
+num_iterations = 100
+warmup_iterations = 5
 
-print("Starting CPU detection...")
-cpu_detection_time = 0
-cpu_roi_time = 0
-cpu_ransac_time = 0
-cpu_total_time = 0
-for i in range(iterations):
-# Create segmentation mask
-    total_start_time = time.perf_counter()
-    start_time_cpu = time.perf_counter()
+print(f"Running {warmup_iterations} warmup iterations...")
+# Warmup iterations to stabilize timing
+for _ in range(warmup_iterations):
     wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector.detect_wires_2d(img)
-    end_time_cpu = time.perf_counter()
-    cpu_detection_time += (end_time_cpu - start_time_cpu)
+    if avg_angle is not None:
+        regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth, avg_angle, midpoint_dists_wrt_center)
+        if len(regions_of_interest) > 0:
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(
+                regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
 
-    start_time_cpu = time.perf_counter()
-    regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth, avg_angle, midpoint_dists_wrt_center)
-    end_time_cpu = time.perf_counter()
-    cpu_roi_time += (end_time_cpu - start_time_cpu)
+print(f"Running {num_iterations} benchmark iterations...")
+timings = []
 
-    start_time_cpu = time.perf_counter()
-    fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
-    # fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
+for i in range(num_iterations):
+    start_time = time.perf_counter()
+    
+    # Run full 3D wire detection pipeline
+    wire_lines, wire_midpoints, avg_angle, midpoint_dists_wrt_center = wire_detector.detect_wires_2d(img)
+    
+    if avg_angle is not None:
+        regions_of_interest, roi_line_counts = wire_detector.find_regions_of_interest(depth, avg_angle, midpoint_dists_wrt_center)
+        
+        if len(regions_of_interest) > 0:
+            fitted_lines, line_inlier_counts, roi_pcs, roi_point_colors, rgb_masked = wire_detector.ransac_on_rois_cpp(
+                regions_of_interest, roi_line_counts, avg_angle, depth, viz_img=None)
+    
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    timings.append(elapsed_time)
+    
+    if (i + 1) % 10 == 0:
+        print(f"Completed {i + 1}/{num_iterations} iterations...")
 
-    end_time_cpu = time.perf_counter()
-    cpu_ransac_time += (end_time_cpu - start_time_cpu)
-    cpu_total_time += (end_time_cpu - total_start_time)
+# Calculate statistics
+timings = np.array(timings)
+mean_time = np.mean(timings)
+min_time = np.min(timings)
+max_time = np.max(timings)
+std_time = np.std(timings)
+median_time = np.median(timings)
 
-avg_cpu_detection_time = cpu_detection_time / iterations
-avg_cpu_roi_time = cpu_roi_time / iterations
-avg_cpu_ransac_time = cpu_ransac_time / iterations
-avg_cpu_total_time = cpu_total_time / iterations
-print(f"Average CPU detection time: {avg_cpu_detection_time:.6f} seconds, {1 / avg_cpu_detection_time:.6f} Hz")
-print(f"Average CPU regions of interest time: {avg_cpu_roi_time:.6f} seconds, {1 / avg_cpu_roi_time:.6f} Hz")
-print(f"Average CPU RANSAC on ROIs time: {avg_cpu_ransac_time:.6f} seconds, {1 / avg_cpu_ransac_time:.6f} Hz")
-print(f"Average CPU total time: {avg_cpu_total_time:.6f} seconds, {1 / avg_cpu_total_time:.6f} Hz")
+mean_fps = 1.0 / mean_time
+min_fps = 1.0 / max_time  # Min FPS corresponds to max time
+max_fps = 1.0 / min_time  # Max FPS corresponds to min time
 
+print("\n" + "="*60)
+print("3D Wire Detection Inference Speed Results")
+print("="*60)
+print(f"Number of iterations: {num_iterations}")
+print(f"Warmup iterations: {warmup_iterations}")
+print("\nTiming Statistics (seconds):")
+print(f"  Mean:   {mean_time*1000:.3f} ms ({mean_time:.6f} s)")
+print(f"  Median: {median_time*1000:.3f} ms ({median_time:.6f} s)")
+print(f"  Min:    {min_time*1000:.3f} ms ({min_time:.6f} s)")
+print(f"  Max:    {max_time*1000:.3f} ms ({max_time:.6f} s)")
+print(f"  Std:    {std_time*1000:.3f} ms ({std_time:.6f} s)")
+print("\nFrame Rate Statistics (FPS):")
+print(f"  Mean:   {mean_fps:.2f} FPS")
+print(f"  Min:    {min_fps:.2f} FPS")
+print(f"  Max:    {max_fps:.2f} FPS")
+print("="*60)
 
